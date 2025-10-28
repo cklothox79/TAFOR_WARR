@@ -18,18 +18,30 @@ with col2:
 with col3:
     validity = st.number_input("🕐 Validity (hours)", min_value=6, max_value=36, value=24, step=6)
 
-metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)", 
-                           "WARR 280330Z 09008KT 9999 FEW020CB 33/24 1009 NOSIG=",
-                           height=100)
+metar_input = st.text_area(
+    "✈️ Masukkan METAR terakhir (opsional)", 
+    "WARR 280330Z 09008KT 9999 FEW020CB 33/24 1009 NOSIG=",
+    height=100
+)
 
 # Tombol generate
 if st.button("🚀 Generate TAFOR"):
-    # Simulasi hasil TAFOR sesuai format ICAO
+    # Parsing info dasar dari METAR
+    try:
+        parts = metar_input.split()
+        wind = next((p for p in parts if p.endswith("KT")), "09005KT")
+        vis = next((p for p in parts if p.isdigit() or "9999" in p), "9999")
+        cloud = next((p for p in parts if p.startswith(("FEW", "SCT", "BKN", "OVC"))), "FEW020")
+    except Exception:
+        wind, vis, cloud = "09005KT", "9999", "FEW020"
+
+    # Hasil TAFOR versi ICAO-like dengan rentang waktu sesuai Perka BMKG
     tafor_lines = [
-        "TAF WARR 280300Z 2803/2903",
-        "09008KT 9999 FEW020CB",
-        "BECMG 280900Z 20005KT 8000 -RA SCT025 BKN040",
-        "BECMG 281500Z 24005KT 9999 SCT020"
+        f"{metar_input}",  # Baris pertama = METAR terakhir
+        "TAF WARR 280300Z 2803/2903",  # Header resmi
+        f"{wind} {vis} {cloud}",
+        "BECMG 2809/2814 20005KT 8000 -RA SCT025 BKN040",
+        "BECMG 2815/2903 24005KT 9999 SCT020"
     ]
     tafor_html = "<br>".join(tafor_lines)
 
@@ -43,10 +55,10 @@ if st.button("🚀 Generate TAFOR"):
     | BMKG Source | OK |
     | Open-Meteo | OK |
     | OGIMET (METAR) | OK |
-    | METAR Input | ✅ WARR 280330Z 09008KT 9999 FEW020CB 33/24 1009 NOSIG= |
+    | METAR Input | ✅ Tersedia |
     """)
 
-    # Tampilan hasil TAFOR
+    # Tampilkan hasil TAFOR
     st.markdown("### 📝 Hasil TAFOR (WARR – Juanda)")
     st.markdown(
         f"""
