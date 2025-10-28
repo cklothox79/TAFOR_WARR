@@ -35,10 +35,9 @@ if st.button("🚀 Generate TAFOR"):
     except Exception:
         wind, vis, cloud = "09005KT", "9999", "FEW020"
 
-    # Hasil TAFOR versi ICAO-like dengan rentang waktu sesuai Perka BMKG
+    # Format TAFOR dengan rentang waktu sesuai Perka BMKG/ICAO
     tafor_lines = [
-        f"{metar_input}",  # Baris pertama = METAR terakhir
-        "TAF WARR 280300Z 2803/2903",  # Header resmi
+        "TAF WARR 280300Z 2803/2903",
         f"{wind} {vis} {cloud}",
         "BECMG 2809/2814 20005KT 8000 -RA SCT025 BKN040",
         "BECMG 2815/2903 24005KT 9999 SCT020"
@@ -46,7 +45,7 @@ if st.button("🚀 Generate TAFOR"):
     tafor_html = "<br>".join(tafor_lines)
 
     st.success("✅ TAFOR generation complete!")
-    
+
     # Ringkasan sumber data
     st.subheader("📊 Ringkasan Sumber Data")
     st.write("""
@@ -58,7 +57,18 @@ if st.button("🚀 Generate TAFOR"):
     | METAR Input | ✅ Tersedia |
     """)
 
-    # Tampilkan hasil TAFOR
+    # METAR terpisah dari TAFOR
+    st.markdown("### 📡 METAR (Observasi Terakhir)")
+    st.markdown(
+        f"""
+        <div style='padding:12px;border:2px solid #bbb;border-radius:10px;background-color:#fafafa;'>
+            <p style='color:#000;font-weight:700;font-size:16px;font-family:monospace;'>{metar_input}</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Hasil TAFOR
     st.markdown("### 📝 Hasil TAFOR (WARR – Juanda)")
     st.markdown(
         f"""
