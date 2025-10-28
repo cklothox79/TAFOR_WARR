@@ -2,128 +2,103 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-from math import radians, sin, cos, sqrt, atan2
 
-st.set_page_config(page_title="TAFOR WARR Generator", layout="wide")
+st.set_page_config(page_title="TAFOR Juanda (WARR)", layout="wide")
 
-st.title("✈️ Automatic TAFOR Generator – WARR (Juanda)")
-st.markdown("Menggabungkan data **BMKG API (v1)** dan **METAR WARR** untuk membuat TAFOR otomatis.")
+st.title("✈️ TAFOR WARR Otomatis – Berdasarkan Desa Gisik Cemandi (Sedati, Sidoarjo)")
+st.caption("Data dari API BMKG (adm1=35, Jawa Timur) – lokasi terdekat dari Bandara Juanda")
 
-# ===================
+# -------------------------------
 # PARAMETER DASAR
-# ===================
-lat_ref = -7.380
-lon_ref = 112.786
-radius_km = 10
-
+# -------------------------------
 tanggal = st.date_input("Tanggal Prakiraan", datetime.now())
 jam_mulai = st.time_input("Jam Mulai (UTC)", datetime.utcnow().replace(minute=0, second=0, microsecond=0))
 durasi = st.selectbox("Durasi TAF (jam)", [6, 9, 12, 18, 24], index=2)
 
-# ===================
-# FUNGSI JARAK
-# ===================
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
-    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
-
-# ===================
-# AMBIL DATA BMKG
-# ===================
-st.subheader("📡 Data BMKG (API v1)")
 bmkg_url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm?adm1=35"
 
-if st.button("🔄 Ambil Data BMKG"):
+# -------------------------------
+# AMBIL DATA BMKG
+# -------------------------------
+st.subheader("📡 Ambil Data BMKG (Jawa Timur)")
+
+if st.button("🔄 Ambil Data BMKG Terdekat Juanda"):
     try:
         r = requests.get(bmkg_url, timeout=20)
         data = r.json()
+        df_list = []
 
-        # Adaptif: bisa di ["data"] atau ["data"]["areas"]
-        if "data" not in data:
-            st.error("❌ Struktur data BMKG tidak sesuai atau kosong.")
+        for item in data.get("data", []):
+            nama = str(item.get("lokasi", "")).upper()
+            adm3 = str(item.get("adm3", "")).upper()
+            if "SEDATI" in adm3 or "GISIK" in nama or "CEMANDI" in nama:
+                df_list.append({
+                    "lokasi": item.get("lokasi"),
+                    "cuaca": item.get("cuaca"),
+                    "suhu": item.get("t"),
+                    "kelembapan": item.get("hu"),
+                    "arah_angin": item.get("wd"),
+                    "kecepatan_angin": item.get("ws"),
+                    "jam": item.get("time")
+                })
+
+        if not df_list:
+            st.warning("Tidak ditemukan data untuk Gisik Cemandi / Sedati.")
         else:
-            raw_list = data["data"]
-            if isinstance(raw_list, dict) and "areas" in raw_list:
-                raw_list = raw_list["areas"]
-
-            df_list = []
-            for item in raw_list:
-                lat = item.get("lat")
-                lon = item.get("lon")
-
-                # Skip jika tidak ada koordinat
-                if lat is None or lon is None:
-                    continue
-
-                dist = haversine(lat_ref, lon_ref, lat, lon)
-                if dist <= radius_km:
-                    df_list.append({
-                        "lokasi": item.get("lokasi") or item.get("name") or "-",
-                        "lat": lat,
-                        "lon": lon,
-                        "jarak_km": round(dist, 2),
-                        "cuaca": item.get("cuaca"),
-                        "suhu": item.get("t"),
-                        "kelembapan": item.get("hu"),
-                        "arah_angin": item.get("wd"),
-                        "kecepatan_angin": item.get("ws")
-                    })
-
-            if len(df_list) == 0:
-                st.warning(f"Tidak ada lokasi dalam radius {radius_km} km dari Juanda.")
-            else:
-                df = pd.DataFrame(df_list)
-                st.success(f"Ditemukan {len(df)} lokasi dalam radius {radius_km} km dari Juanda.")
-                st.dataframe(df)
+            df = pd.DataFrame(df_list)
+            st.success(f"Ditemukan {len(df)} data prakiraan dari wilayah Sedati.")
+            st.dataframe(df)
+            st.session_state["df_bmkg"] = df
 
     except Exception as e:
         st.error(f"Gagal mengambil data BMKG: {e}")
 
-# ===================
-# AMBIL METAR WARR
-# ===================
-st.subheader("🛰️ METAR WARR (Aviation Weather)")
-metar_url = "https://aviationweather.gov/api/data/metar?ids=WARR&format=JSON"
+# -------------------------------
+# GENERATE TAFOR OTOMATIS
+# -------------------------------
+st.subheader("✈️ Hasil TAFOR Otomatis (Simulasi WARR)")
 
-if st.button("📡 Ambil METAR WARR"):
-    try:
-        metar_data = requests.get(metar_url, timeout=15).json()
-        if "features" in metar_data:
-            metar_text = metar_data["features"][0]["properties"]["rawOb"]
-            st.code(metar_text, language="text")
-        else:
-            st.warning("METAR tidak tersedia.")
-    except Exception as e:
-        st.error(f"Gagal mengambil METAR: {e}")
-
-# ===================
-# GENERATE TAFOR
-# ===================
-st.subheader("✈️ Generate TAFOR Otomatis")
-
-def generate_tafor(tgl, jam, durasi):
+def generate_tafor_from_bmkg(df, tgl, jam, durasi):
     start = datetime.combine(tgl, jam)
     end = start + timedelta(hours=durasi)
     valid_period = f"{start.strftime('%d%H')}/{end.strftime('%d%H')}"
 
-    tafor_text = f"""TAF WARR {start.strftime('%d%H%M')}Z {valid_period}
-    09010KT 8000 FEW018 SCT025
-    TEMPO 1000 SHRA
-    BECMG { (start + timedelta(hours=3)).strftime('%d%H%M') } 09012KT 6000 -RA SCT020"""
+    taf_lines = [f"TAF WARR {start.strftime('%d%H%M')}Z {valid_period}"]
+
+    # Ambil data awal dan perubahan
+    df = df.head(4)
+    prev_cuaca = None
+    for i, row in df.iterrows():
+        cuaca = str(row['cuaca']).lower()
+        ws = row['kecepatan_angin']
+        wd = row['arah_angin']
+        suhu = row['suhu']
+
+        # Baris awal
+        if i == 0:
+            taf_lines.append(f"{wd}0{int(ws or 5):02d}KT 8000 FEW018 SCT025 {cuaca.upper()}")
+        else:
+            if prev_cuaca and cuaca != prev_cuaca:
+                taf_lines.append(f"TEMPO {wd}0{int(ws or 5):02d}KT 6000 {cuaca.upper()}")
+            elif ws and abs(ws - df.iloc[i-1]['kecepatan_angin']) > 5:
+                taf_lines.append(f"BECMG {wd}0{int(ws):02d}KT")
+        prev_cuaca = cuaca
+
+    tafor_text = "\n".join(taf_lines)
     return tafor_text
 
-if st.button("🧭 Buat TAFOR WARR"):
-    tafor_output = generate_tafor(tanggal, jam_mulai, durasi)
-    st.code(tafor_output, language="yaml")
-    st.download_button(
-        label="💾 Unduh TAFOR (TXT)",
-        data=tafor_output,
-        file_name=f"TAFOR_WARR_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-        mime="text/plain"
-    )
+if st.button("🧭 Generate TAFOR Juanda"):
+    if "df_bmkg" in st.session_state:
+        tafor_text = generate_tafor_from_bmkg(st.session_state["df_bmkg"], tanggal, jam_mulai, durasi)
+        st.code(tafor_text, language="yaml")
+        st.download_button(
+            label="💾 Unduh TAFOR (TXT)",
+            data=tafor_text,
+            file_name=f"TAFOR_WARR_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain"
+        )
+    else:
+        st.warning("Ambil data BMKG terlebih dahulu.")
 
 st.markdown("---")
-st.caption("Versi fix error NoneType + adaptif struktur JSON BMKG")
+st.caption("Sumber: API BMKG open data (adm1=35) – Filtering Gisik Cemandi/Sedati (Sidoarjo)")
