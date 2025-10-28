@@ -41,17 +41,27 @@ if st.button("🔄 Ambil Data BMKG"):
         r = requests.get(bmkg_url, timeout=20)
         data = r.json()
 
-        if "data" not in data or len(data["data"]) == 0:
-            st.error("❌ Tidak ada data ditemukan dari API BMKG.")
+        # Adaptif: bisa di ["data"] atau ["data"]["areas"]
+        if "data" not in data:
+            st.error("❌ Struktur data BMKG tidak sesuai atau kosong.")
         else:
+            raw_list = data["data"]
+            if isinstance(raw_list, dict) and "areas" in raw_list:
+                raw_list = raw_list["areas"]
+
             df_list = []
-            for item in data["data"]:
+            for item in raw_list:
                 lat = item.get("lat")
                 lon = item.get("lon")
+
+                # Skip jika tidak ada koordinat
+                if lat is None or lon is None:
+                    continue
+
                 dist = haversine(lat_ref, lon_ref, lat, lon)
                 if dist <= radius_km:
                     df_list.append({
-                        "lokasi": item.get("lokasi"),
+                        "lokasi": item.get("lokasi") or item.get("name") or "-",
                         "lat": lat,
                         "lon": lon,
                         "jarak_km": round(dist, 2),
@@ -116,4 +126,4 @@ if st.button("🧭 Buat TAFOR WARR"):
     )
 
 st.markdown("---")
-st.caption("Versi fix API BMKG v1 + radius filtering ±10 km Juanda")
+st.caption("Versi fix error NoneType + adaptif struktur JSON BMKG")
