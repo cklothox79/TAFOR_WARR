@@ -17,9 +17,10 @@ st.caption("Fusion: METAR (OGIMET/NOAA) + Open-Meteo (+BMKG optional). Output: T
 # ---------- Inputs ----------
 col1, col2, col3 = st.columns([1,1,1])
 with col1:
-    issue_dt = st.datetime_input("Issue (UTC)", value=datetime.utcnow())
+    issue_date = st.date_input("📅 Issue date (UTC)", value=datetime.utcnow().date())
 with col2:
-    validity = st.selectbox("Validity (hours)", options=[6,9,12,18,24,30], index=4)
+    issue_time = st.time_input("🕓 Issue time (UTC)", value=datetime.utcnow().time())
+issue_dt = datetime.combine(issue_date, issue_time)
 with col3:
     use_bmkg = st.checkbox("Use BMKG point API (optional)", value=False)
 
@@ -69,11 +70,8 @@ def fetch_openmeteo(lon=LON, lat=LAT):
 
 
 def analyze_trend_from_df(df: pd.DataFrame, hours_ahead=3):
-    # use nearest UTC index
     now_utc = pd.to_datetime(datetime.utcnow().replace(minute=0, second=0, microsecond=0))
-    # find index
     if now_utc not in df['time'].values:
-        # align to closest
         idx = (df['time'] - now_utc).abs().idxmin()
     else:
         idx = df.index[df['time'] == now_utc][0]
@@ -86,17 +84,14 @@ def analyze_trend_from_df(df: pd.DataFrame, hours_ahead=3):
     deltaP = p['precip'].sum()
     deltaCloud = p['cloud'].iloc[-1] - p['cloud'].iloc[0]
 
-    # Simple rule-based decision tree (tunable)
     if deltaP >= 1.0 or (deltaP > 0 and deltaCloud > 10):
-        # enough rain accumulation or significant cloud increase
         trend_type = 'TEMPO'
-        # choose vis & cloud
         trend_text = f"TEMPO {now_utc.strftime('%d%H')}/{(now_utc+timedelta(hours=hours_ahead)).strftime('%d%H')} 3000 +TSRA BKN010CB"
         narrative = 'Potensi hujan lebat disertai petir (TSRA) — perhatikan visibilitas turun.'
     elif deltaT <= -2 and deltaRH >= 10:
         trend_type = 'BECMG'
         trend_text = f"BECMG {now_utc.strftime('%d%H')}/{(now_utc+timedelta(hours=hours_ahead)).strftime('%d%H')} 5000 BR SCT020"
-        narrative = 'Kondisi menjadi lebih lembap—potensi penurunan visibilitas (BR).' 
+        narrative = 'Kondisi menjadi lebih lembap—potensi penurunan visibilitas (BR).'
     elif deltaT >= 2 and deltaRH <= -10:
         trend_type = 'BECMG'
         trend_text = f"BECMG {now_utc.strftime('%d%H')}/{(now_utc+timedelta(hours=hours_ahead)).strftime('%d%H')} 9999 NSW FEW030"
@@ -113,11 +108,9 @@ def analyze_trend_from_df(df: pd.DataFrame, hours_ahead=3):
 if st.button('Generate TAFOR + TREND'):
     wind, vis, cloud = parse_metar_simple(metar_input)
 
-    # TAF header
     valid_to = issue_dt + timedelta(hours=validity)
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
 
-    # baseline TAF lines (simple template)
     b1s = issue_dt + timedelta(hours=4)
     b1e = b1s + timedelta(hours=4)
     b2s = issue_dt + timedelta(hours=12)
@@ -132,27 +125,22 @@ if st.button('Generate TAFOR + TREND'):
 
     st.success('TAFOR baseline generated')
 
-    # fetch Open-Meteo
     df_om = fetch_openmeteo()
     if df_om is not None:
         trend_code, narrative, details = analyze_trend_from_df(df_om, hours_ahead=3)
     else:
         trend_code, narrative, details = 'NOSIG', 'Open-Meteo data not available', {}
 
-    # Show TAF
     st.subheader('Generated TAFOR (draft)')
     st.code('\n'.join(taf_lines), language='text')
 
-    # Show TREND
     st.subheader('Auto-TREND (2–3 jam ke depan)')
     st.markdown(f"**{trend_code}**")
     st.write(narrative)
     st.json(details)
 
-    # Interactive plots
     if df_om is not None:
         st.subheader('Forecast time-series (Open-Meteo)')
-        # limit to next 24 hours
         now_utc = pd.to_datetime(datetime.utcnow())
         mask = (df_om['time'] >= now_utc - pd.Timedelta('1H')) & (df_om['time'] <= now_utc + pd.Timedelta(hours=24))
         plot_df = df_om.loc[mask].reset_index(drop=True)
@@ -167,6 +155,5 @@ if st.button('Generate TAFOR + TREND'):
 
     st.info('Experimental: validate with official TAF/TAF AMD from BMKG before operational use')
 
-# Footer
 st.markdown('---')
 st.caption('Built for prototyping — adapt thresholds & rules to local forecaster practice.')
