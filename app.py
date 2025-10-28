@@ -1,131 +1,172 @@
+# streamlit_auto_tafor_with_trend.py
+# Auto TAFOR + TREND for WARR (Juanda)
+# - Fusion: METAR (OGIMET/NOAA) + Open-Meteo + (optional) BMKG
+# - Outputs: TAF-like block + automatic 2–6 hour TREND + interactive charts
+# Run: streamlit run streamlit_auto_tafor_with_trend.py
+
 import streamlit as st
 import requests
+import pandas as pd
 from datetime import datetime, timedelta
+import plotly.express as px
 
-st.set_page_config(page_title="🛫 Auto TAFOR Generator — WARR (Juanda)", layout="centered")
+st.set_page_config(page_title="🛫 Auto TAFOR + TREND — WARR (Juanda)", layout="wide")
+st.title("🛫 Auto TAFOR + TREND — WARR (Juanda)")
+st.caption("Fusion: METAR (OGIMET/NOAA) + Open-Meteo (+BMKG optional). Output: TAF-like + TREND otomatis + grafik.")
 
-st.markdown("## 🛫 Auto TAFOR Generator — WARR (Juanda)")
-st.write("Fusion: BMKG (point → adm4 Sedati Gede) + Open-Meteo + METAR (OGIMET) → output TAFOR + TREND otomatis.")
-st.divider()
-
-# Input waktu
-col1, col2, col3 = st.columns(3)
+# ---------- Inputs ----------
+col1, col2, col3 = st.columns([1,1,1])
 with col1:
-    issue_date = st.text_input("📅 Issue date (UTC)", value=datetime.utcnow().strftime("%Y/%m/%d"))
+    issue_dt = st.datetime_input("Issue (UTC)", value=datetime.utcnow())
 with col2:
-    issue_time = st.text_input("🕓 Issue time (UTC)", value=datetime.utcnow().strftime("%H:00"))
+    validity = st.selectbox("Validity (hours)", options=[6,9,12,18,24,30], index=4)
 with col3:
-    validity = st.number_input("🕐 Validity (hours)", min_value=6, max_value=36, value=24, step=6)
+    use_bmkg = st.checkbox("Use BMKG point API (optional)", value=False)
 
-metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)",
-                           "WARR 280430Z 09008KT 9999 FEW020CB 33/24 Q1009 NOSIG=",
-                           height=100)
+metar_input = st.text_area("METAR input (optional)", value="WARR 280430Z 09008KT 9999 FEW020CB 33/24 Q1009 NOSIG=", height=100)
 
-# Fungsi ambil data Open-Meteo
-def get_openmeteo_trend(lat=-7.38, lon=112.77):
-    url = (f"https://api.open-meteo.com/v1/forecast?"
-           f"latitude={lat}&longitude={lon}"
-           f"&hourly=temperature_2m,relative_humidity_2m,precipitation"
-           f"&timezone=Asia%2FJakarta")
-    r = requests.get(url)
-    if r.status_code != 200:
-        return None
-    data = r.json()
-    df = {
-        "time": data["hourly"]["time"],
-        "temp": data["hourly"]["temperature_2m"],
-        "rh": data["hourly"]["relative_humidity_2m"],
-        "rain": data["hourly"]["precipitation"]
-    }
-    return df
+st.markdown("---")
 
-# Analisis trend otomatis
-def analyze_trend(df):
-    now_idx = 0
-    next3_idx = min(len(df["time"]) - 1, now_idx + 3)
-    dt1, dt2 = df["time"][now_idx], df["time"][next3_idx]
-    temp1, temp2 = df["temp"][now_idx], df["temp"][next3_idx]
-    rh1, rh2 = df["rh"][now_idx], df["rh"][next3_idx]
-    rain1, rain2 = df["rain"][now_idx], df["rain"][next3_idx]
+# ---------- Configurable endpoints / params ----------
+LAT, LON = -7.379, 112.787  # approximate Juanda
+OPENMETEO_URL = (
+    f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}"
+    "&hourly=temperature_2m,relative_humidity_2m,precipitation,cloudcover,wind_speed_10m,wind_direction_10m"
+    "&timezone=UTC"
+)
 
-    deltaT = temp2 - temp1
-    deltaRH = rh2 - rh1
-    deltaR = rain2 - rain1
+BMKG_EXAMPLE_URL = """https://wilayahbmkg.example/api/point?adm4=..."""  # replace with real BMKG endpoint if available
 
-    # Logika sederhana TREND
-    if deltaR > 0.1 and deltaRH > 5:
-        trend_code = f"TEMPO {datetime.utcnow().strftime('%d%H')}/{(datetime.utcnow()+timedelta(hours=2)).strftime('%d%H')} 4000 -RA BKN015"
-        desc = "🚿 Potensi hujan ringan/CB (curah hujan meningkat)."
-    elif deltaT < -2 and deltaRH > 10:
-        trend_code = f"BECMG {datetime.utcnow().strftime('%d%H')}/{(datetime.utcnow()+timedelta(hours=2)).strftime('%d%H')} 5000 BR SCT020"
-        desc = "🌫️ Perubahan bertahap ke kondisi lebih lembap/berawan."
-    elif deltaT > 2 and deltaRH < -10:
-        trend_code = f"BECMG {datetime.utcnow().strftime('%d%H')}/{(datetime.utcnow()+timedelta(hours=2)).strftime('%d%H')} 9999 NSW FEW030"
-        desc = "☀️ Kondisi membaik, kelembapan menurun."
-    else:
-        trend_code = "NOSIG"
-        desc = "✅ Tidak ada perubahan signifikan."
+OGIMET_METAR_URL = "https://aviationweather.gov/adds/dataserver_current/httpparam"
 
-    return trend_code, desc
+# ---------- Helper functions ----------
 
-if st.button("🚀 Generate TAFOR + TREND"):
-    # Parsing METAR
+def parse_metar_simple(metar_text: str):
+    parts = metar_text.replace('=', ' ').split()
+    wind = next((p for p in parts if p.endswith('KT')), '00000KT')
+    vis = next((p for p in parts if p.isdigit() or '9999' in p), '9999')
+    cloud = next((p for p in parts if p.startswith(('FEW','SCT','BKN','OVC')), 'FEW020'))
+    return wind, vis, cloud
+
+
+def fetch_openmeteo(lon=LON, lat=LAT):
     try:
-        parts = metar_input.split()
-        wind = next((p for p in parts if p.endswith("KT")), "09005KT")
-        vis = next((p for p in parts if p.isdigit() or "9999" in p), "9999")
-        cloud = next((p for p in parts if p.startswith(("FEW", "SCT", "BKN", "OVC"))), "FEW020")
-    except Exception:
-        wind, vis, cloud = "09005KT", "9999", "FEW020"
+        r = requests.get(OPENMETEO_URL, timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        df = pd.DataFrame({
+            'time': pd.to_datetime(j['hourly']['time']),
+            'temp': j['hourly']['temperature_2m'],
+            'rh': j['hourly']['relative_humidity_2m'],
+            'precip': j['hourly']['precipitation'],
+            'cloud': j['hourly']['cloudcover'],
+            'wind': j['hourly']['wind_speed_10m']
+        })
+        return df
+    except Exception as e:
+        st.warning(f"Open-Meteo fetch failed: {e}")
+        return None
 
-    issue_dt = datetime.strptime(f"{issue_date} {issue_time}", "%Y/%m/%d %H:%M")
+
+def analyze_trend_from_df(df: pd.DataFrame, hours_ahead=3):
+    # use nearest UTC index
+    now_utc = pd.to_datetime(datetime.utcnow().replace(minute=0, second=0, microsecond=0))
+    # find index
+    if now_utc not in df['time'].values:
+        # align to closest
+        idx = (df['time'] - now_utc).abs().idxmin()
+    else:
+        idx = df.index[df['time'] == now_utc][0]
+
+    end_idx = min(len(df)-1, idx + hours_ahead)
+    p = df.loc[idx:end_idx]
+
+    deltaT = p['temp'].iloc[-1] - p['temp'].iloc[0]
+    deltaRH = p['rh'].iloc[-1] - p['rh'].iloc[0]
+    deltaP = p['precip'].sum()
+    deltaCloud = p['cloud'].iloc[-1] - p['cloud'].iloc[0]
+
+    # Simple rule-based decision tree (tunable)
+    if deltaP >= 1.0 or (deltaP > 0 and deltaCloud > 10):
+        # enough rain accumulation or significant cloud increase
+        trend_type = 'TEMPO'
+        # choose vis & cloud
+        trend_text = f"TEMPO {now_utc.strftime('%d%H')}/{(now_utc+timedelta(hours=hours_ahead)).strftime('%d%H')} 3000 +TSRA BKN010CB"
+        narrative = 'Potensi hujan lebat disertai petir (TSRA) — perhatikan visibilitas turun.'
+    elif deltaT <= -2 and deltaRH >= 10:
+        trend_type = 'BECMG'
+        trend_text = f"BECMG {now_utc.strftime('%d%H')}/{(now_utc+timedelta(hours=hours_ahead)).strftime('%d%H')} 5000 BR SCT020"
+        narrative = 'Kondisi menjadi lebih lembap—potensi penurunan visibilitas (BR).' 
+    elif deltaT >= 2 and deltaRH <= -10:
+        trend_type = 'BECMG'
+        trend_text = f"BECMG {now_utc.strftime('%d%H')}/{(now_utc+timedelta(hours=hours_ahead)).strftime('%d%H')} 9999 NSW FEW030"
+        narrative = 'Kondisi membaik; kelembapan turun, berawan berkurang.'
+    else:
+        trend_type = 'NOSIG'
+        trend_text = 'NOSIG'
+        narrative = 'Tidak ada perubahan signifikan terdeteksi dalam jangka pendek.'
+
+    details = dict(deltaT=deltaT, deltaRH=deltaRH, deltaP=deltaP, deltaCloud=deltaCloud)
+    return trend_text, narrative, details
+
+# ---------- Main generate logic ----------
+if st.button('Generate TAFOR + TREND'):
+    wind, vis, cloud = parse_metar_simple(metar_input)
+
+    # TAF header
     valid_to = issue_dt + timedelta(hours=validity)
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
 
-    # Susunan TAFOR
-    becmg1_start = issue_dt + timedelta(hours=4)
-    becmg1_end = becmg1_start + timedelta(hours=5)
-    becmg2_start = issue_dt + timedelta(hours=10)
-    becmg2_end = becmg2_start + timedelta(hours=6)
+    # baseline TAF lines (simple template)
+    b1s = issue_dt + timedelta(hours=4)
+    b1e = b1s + timedelta(hours=4)
+    b2s = issue_dt + timedelta(hours=12)
+    b2e = b2s + timedelta(hours=6)
 
-    tafor_lines = [
+    taf_lines = [
         taf_header,
-        f"{wind} {vis} {cloud}",
-        f"BECMG {becmg1_start.strftime('%d%H')}/{becmg1_end.strftime('%d%H')} 20005KT 8000 -RA SCT025 BKN040",
-        f"BECMG {becmg2_start.strftime('%d%H')}/{becmg2_end.strftime('%d%H')} 24005KT 9999 SCT020"
+        f"{wind} {vis} {cloud} Q1009",
+        f"BECMG {b1s.strftime('%d%H')}/{b1e.strftime('%d%H')} 20006KT 8000 -RA SCT025 BKN040",
+        f"BECMG {b2s.strftime('%d%H')}/{b2e.strftime('%d%H')} 24006KT 9999 SCT020"
     ]
 
-    # Ambil data trend dari Open-Meteo
-    data_trend = get_openmeteo_trend()
-    if data_trend:
-        trend_code, desc = analyze_trend(data_trend)
+    st.success('TAFOR baseline generated')
+
+    # fetch Open-Meteo
+    df_om = fetch_openmeteo()
+    if df_om is not None:
+        trend_code, narrative, details = analyze_trend_from_df(df_om, hours_ahead=3)
     else:
-        trend_code, desc = "NOSIG", "⚠️ Data trend tidak tersedia."
+        trend_code, narrative, details = 'NOSIG', 'Open-Meteo data not available', {}
 
-    tafor_html = "<br>".join(tafor_lines)
+    # Show TAF
+    st.subheader('Generated TAFOR (draft)')
+    st.code('\n'.join(taf_lines), language='text')
 
-    st.success("✅ TAFOR + TREND generation complete!")
+    # Show TREND
+    st.subheader('Auto-TREND (2–3 jam ke depan)')
+    st.markdown(f"**{trend_code}**")
+    st.write(narrative)
+    st.json(details)
 
-    st.markdown("### 📡 METAR (Observasi Terakhir)")
-    st.markdown(f"""
-        <div style='padding:12px;border:2px solid #bbb;border-radius:10px;background-color:#fafafa;'>
-            <p style='color:#000;font-weight:700;font-size:16px;font-family:monospace;'>{metar_input}</p>
-        </div>
-        """, unsafe_allow_html=True)
+    # Interactive plots
+    if df_om is not None:
+        st.subheader('Forecast time-series (Open-Meteo)')
+        # limit to next 24 hours
+        now_utc = pd.to_datetime(datetime.utcnow())
+        mask = (df_om['time'] >= now_utc - pd.Timedelta('1H')) & (df_om['time'] <= now_utc + pd.Timedelta(hours=24))
+        plot_df = df_om.loc[mask].reset_index(drop=True)
 
-    st.markdown("### 📝 Hasil TAFOR (WARR – Juanda)")
-    st.markdown(f"""
-        <div style='padding:15px;border:2px solid #555;border-radius:10px;background-color:#f9f9f9;'>
-            <p style='color:#000;font-weight:700;font-size:16px;line-height:1.8;font-family:monospace;'>{tafor_html}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            fig_t = px.line(plot_df, x='time', y=['temp','rh'], labels={'value':'Value','time':'UTC'}, title='Temperature (°C) & RH (%)')
+            st.plotly_chart(fig_t, use_container_width=True)
+        with col_t2:
+            fig_p = px.bar(plot_df, x='time', y='precip', labels={'precip':'Precip (mm)'}, title='Precipitation (mm per hour)')
+            st.plotly_chart(fig_p, use_container_width=True)
 
-    st.markdown("### 🔄 TREND Otomatis (2 Jam ke Depan)")
-    st.markdown(f"""
-        <div style='padding:15px;border:2px solid #4a4;border-radius:10px;background-color:#f0fff0;'>
-            <p style='color:#000;font-weight:700;font-size:16px;font-family:monospace;'>{trend_code}</p>
-            <p>{desc}</p>
-        </div>
-        """, unsafe_allow_html=True)
+    st.info('Experimental: validate with official TAF/TAF AMD from BMKG before operational use')
 
-    st.caption("💡 TREND dihitung dari perubahan suhu, kelembapan, dan curah hujan (API Open-Meteo).")
+# Footer
+st.markdown('---')
+st.caption('Built for prototyping — adapt thresholds & rules to local forecaster practice.')
