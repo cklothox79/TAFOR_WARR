@@ -45,7 +45,7 @@ def parse_metar_simple(metar_text: str):
     parts = metar_text.replace('=', ' ').split()
     wind = next((p for p in parts if p.endswith('KT')), '00000KT')
     vis = next((p for p in parts if p.isdigit() or '9999' in p), '9999')
-    cloud = next((p for p in parts if p.startswith(('FEW','SCT','BKN','OVC')), 'FEW020'))
+    cloud = next((p for p in parts if p.startswith(('FEW', 'SCT', 'BKN', 'OVC'))), 'FEW020')
     return wind, vis, cloud
 
 
