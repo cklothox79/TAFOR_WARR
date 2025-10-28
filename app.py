@@ -24,22 +24,21 @@ with col3:
 st.markdown("### ✈️ Masukkan METAR terakhir (opsional)")
 metar_input = st.text_input(
     "METAR Observasi Terakhir:",
-    placeholder="Contoh: WARR 280300Z 08005KT 7000 FEW020 SCT030 26/24 Q1010",
+    placeholder="Contoh: WARR 280330Z 09008KT 9999 FEW020CB 33/24 Q1009 NOSIG=",
 )
 
 generate = st.button("🔁 Generate TAFOR")
 
-# --- Fungsi simulasi data model dan hasil ---
+# --- Fungsi Simulasi Output ---
 def generate_tafor(issue_date, issue_time, validity, metar_input):
-    # Simulasi data sumber
+    # Format ICAO / BMKG standar (maks 4 baris)
     tafor_lines = [
         "TAF WARR 280300Z 2803/2903",
-        "280300Z 2803/2809 07005KT 24140 OVC020",
-        "280900Z 2809/2815 21004KT 11900 -RA OVC020",
-        "281500Z 2815/2903 24005KT 24140 OVC020",
-        "BECMG 280600Z/280900Z 07005KT 24140 OVC020",
+        "280300Z 2803/2809 09008KT 9999 FEW020CB",
+        "280900Z 2809/2815 20005KT 8000 -RA SCT025 BKN040",
+        "281500Z 2815/2903 24005KT 9999 SCT020",
+        "BECMG 280600Z/280900Z 09008KT 9999 FEW020CB",
     ]
-
     tafor_text = "\n".join(tafor_lines)
 
     summary = {
@@ -51,23 +50,21 @@ def generate_tafor(issue_date, issue_time, validity, metar_input):
 
     return tafor_text, summary
 
-
 # --- Eksekusi Generate ---
 if generate:
     with st.spinner("🔄 Menghasilkan TAFOR otomatis..."):
         tafor_text, taf_summary = generate_tafor(issue_date, issue_time, validity, metar_input)
 
-    # --- Ringkasan Proses ---
     st.success("✅ **TAFOR generation complete!**")
     st.write("### 📊 Ringkasan Sumber Data")
     st.table(pd.DataFrame([taf_summary]))
 
-    # --- Tampilan Hasil TAFOR ---
+    # --- Kotak hasil TAFOR tanpa background ---
     st.markdown("### 📝 **Hasil TAFOR (WARR – Juanda)**")
     st.markdown(
         f"""
-        <div style='background-color:#111827;padding:15px;border-radius:10px;'>
-            <pre style='color:#00ff88;font-weight:bold;font-size:16px;'>{tafor_text}</pre>
+        <div style='border:2px solid #ccc;padding:15px;border-radius:10px;'>
+            <pre style='color:#000;font-weight:700;font-size:16px;line-height:1.4;'>{tafor_text}</pre>
         </div>
         """,
         unsafe_allow_html=True,
