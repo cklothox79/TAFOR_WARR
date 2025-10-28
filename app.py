@@ -1,104 +1,86 @@
 import streamlit as st
 import requests
-import pandas as pd
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="TAFOR Juanda (WARR)", layout="wide")
+# --- KONFIGURASI DASAR ---
+LAT, LON = -7.380, 112.786
+ADM4_CODE = "35.15.17.2011"  # Desa Sedati Gede
+BMKG_POINT = f"https://cuaca.bmkg.go.id/api/df/v1/forecast/point?lat={LAT}&lon={LON}"
+BMKG_ADM4 = f"https://cuaca.bmkg.go.id/api/df/v1/forecast/adm?adm4={ADM4_CODE}"
+OPENMETEO = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=temperature_2m,precipitation,cloudcover,visibility,winddirection_10m,windspeed_10m&forecast_days=1"
+METAR_URL = (
+    "https://aviationweather.gov/adds/dataserver_current/httpparam?"
+    "datasource=metars&requestType=retrieve&format=xml&stationString=WARR&hoursBeforeNow=2"
+)
 
-st.title("✈️ TAFOR WARR Otomatis – Berdasarkan Desa Gisik Cemandi (Sedati, Sidoarjo)")
-st.caption("Data dari API BMKG (adm1=35, Jawa Timur) – lokasi terdekat dari Bandara Juanda")
+st.set_page_config(page_title="TAFOR WARR Generator", layout="wide")
+st.title("🛫 Auto TAFOR Generator – WARR (Juanda)")
 
-# -------------------------------
-# PARAMETER DASAR
-# -------------------------------
-tanggal = st.date_input("Tanggal Prakiraan", datetime.now())
-jam_mulai = st.time_input("Jam Mulai (UTC)", datetime.utcnow().replace(minute=0, second=0, microsecond=0))
-durasi = st.selectbox("Durasi TAF (jam)", [6, 9, 12, 18, 24], index=2)
+# --- STEP 1: BMKG POINT ---
+st.subheader("📡 Data BMKG Point / Desa Sedati Gede")
+try:
+    res = requests.get(BMKG_POINT, timeout=10)
+    data_bmkg = res.json()
+    if "data" not in data_bmkg or not data_bmkg["data"]:
+        raise ValueError("BMKG Point kosong, ambil dari Adm4...")
+except Exception:
+    res = requests.get(BMKG_ADM4, timeout=10)
+    data_bmkg = res.json()
+    st.warning("BMKG Point gagal, menggunakan data Desa Sedati Gede (adm4).")
 
-bmkg_url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm?adm1=35"
+if data_bmkg:
+    st.success("✅ Data BMKG berhasil diambil.")
+else:
+    st.error("❌ Tidak ada data BMKG.")
+    st.stop()
 
-# -------------------------------
-# AMBIL DATA BMKG
-# -------------------------------
-st.subheader("📡 Ambil Data BMKG (Jawa Timur)")
+# --- STEP 2: Open-Meteo ---
+st.subheader("🌍 Data Open-Meteo")
+try:
+    res2 = requests.get(OPENMETEO, timeout=10)
+    data_open = res2.json()
+    st.success("✅ Data Open-Meteo berhasil diambil.")
+except Exception as e:
+    data_open = None
+    st.error(f"Gagal ambil Open-Meteo: {e}")
 
-if st.button("🔄 Ambil Data BMKG Terdekat Juanda"):
-    try:
-        r = requests.get(bmkg_url, timeout=20)
-        data = r.json()
-        df_list = []
-
-        for item in data.get("data", []):
-            nama = str(item.get("lokasi", "")).upper()
-            adm3 = str(item.get("adm3", "")).upper()
-            if "SEDATI" in adm3 or "GISIK" in nama or "CEMANDI" in nama:
-                df_list.append({
-                    "lokasi": item.get("lokasi"),
-                    "cuaca": item.get("cuaca"),
-                    "suhu": item.get("t"),
-                    "kelembapan": item.get("hu"),
-                    "arah_angin": item.get("wd"),
-                    "kecepatan_angin": item.get("ws"),
-                    "jam": item.get("time")
-                })
-
-        if not df_list:
-            st.warning("Tidak ditemukan data untuk Gisik Cemandi / Sedati.")
-        else:
-            df = pd.DataFrame(df_list)
-            st.success(f"Ditemukan {len(df)} data prakiraan dari wilayah Sedati.")
-            st.dataframe(df)
-            st.session_state["df_bmkg"] = df
-
-    except Exception as e:
-        st.error(f"Gagal mengambil data BMKG: {e}")
-
-# -------------------------------
-# GENERATE TAFOR OTOMATIS
-# -------------------------------
-st.subheader("✈️ Hasil TAFOR Otomatis (Simulasi WARR)")
-
-def generate_tafor_from_bmkg(df, tgl, jam, durasi):
-    start = datetime.combine(tgl, jam)
-    end = start + timedelta(hours=durasi)
-    valid_period = f"{start.strftime('%d%H')}/{end.strftime('%d%H')}"
-
-    taf_lines = [f"TAF WARR {start.strftime('%d%H%M')}Z {valid_period}"]
-
-    # Ambil data awal dan perubahan
-    df = df.head(4)
-    prev_cuaca = None
-    for i, row in df.iterrows():
-        cuaca = str(row['cuaca']).lower()
-        ws = row['kecepatan_angin']
-        wd = row['arah_angin']
-        suhu = row['suhu']
-
-        # Baris awal
-        if i == 0:
-            taf_lines.append(f"{wd}0{int(ws or 5):02d}KT 8000 FEW018 SCT025 {cuaca.upper()}")
-        else:
-            if prev_cuaca and cuaca != prev_cuaca:
-                taf_lines.append(f"TEMPO {wd}0{int(ws or 5):02d}KT 6000 {cuaca.upper()}")
-            elif ws and abs(ws - df.iloc[i-1]['kecepatan_angin']) > 5:
-                taf_lines.append(f"BECMG {wd}0{int(ws):02d}KT")
-        prev_cuaca = cuaca
-
-    tafor_text = "\n".join(taf_lines)
-    return tafor_text
-
-if st.button("🧭 Generate TAFOR Juanda"):
-    if "df_bmkg" in st.session_state:
-        tafor_text = generate_tafor_from_bmkg(st.session_state["df_bmkg"], tanggal, jam_mulai, durasi)
-        st.code(tafor_text, language="yaml")
-        st.download_button(
-            label="💾 Unduh TAFOR (TXT)",
-            data=tafor_text,
-            file_name=f"TAFOR_WARR_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-            mime="text/plain"
-        )
+# --- STEP 3: METAR ---
+st.subheader("🛰️ METAR WARR")
+try:
+    rmet = requests.get(METAR_URL, timeout=10)
+    if rmet.status_code == 200:
+        st.success("✅ METAR WARR berhasil diambil.")
+        st.code(rmet.text[:1500], language="xml")
     else:
-        st.warning("Ambil data BMKG terlebih dahulu.")
+        st.warning("METAR gagal diambil.")
+except Exception as e:
+    st.error(f"METAR error: {e}")
 
-st.markdown("---")
-st.caption("Sumber: API BMKG open data (adm1=35) – Filtering Gisik Cemandi/Sedati (Sidoarjo)")
+# --- STEP 4: ANALISIS & GENERATE TAFOR ---
+st.subheader("✈️ TAFOR WARR (Generated)")
+
+# Simulasi logika sederhana untuk contoh
+current_time = datetime.utcnow()
+taf_start = current_time.strftime("%d%H%MZ")
+taf_valid = f"{current_time.strftime('%d%H')}/{(current_time+timedelta(hours=24)).strftime('%d%H')}"
+
+# Contoh ekstraksi parameter sederhana
+wind_dir = 100
+wind_speed = 10
+visibility = 8000
+weather = "FEW020 SCT030"
+remark = "No significant weather"
+
+# logika perubahan (dummy contoh)
+taf_lines = [
+    f"TAF WARR {taf_start} {taf_valid} {wind_dir:03d}{wind_speed:02d}KT {visibility} {weather}",
+    f"BECMG {current_time.strftime('%d%H')}30 {wind_dir+30:03d}{wind_speed+2:02d}KT SHRA BKN015",
+    f"TEMPO {current_time.strftime('%d%H')}50/{(current_time+timedelta(hours=3)).strftime('%d%H')}0 3000 TSRA BKN010",
+    "FM290600 25012KT 9999 SCT020"
+]
+
+for line in taf_lines:
+    st.code(line)
+
+st.success("✅ TAFOR otomatis berhasil dibuat (contoh format ICAO).")
+st.caption("Note: Versi ini masih simulasi. Nanti logika otomatis akan menyesuaikan perubahan signifikan dari data BMKG + OpenMeteo + METAR.")
