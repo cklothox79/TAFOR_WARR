@@ -36,8 +36,9 @@ if st.button("🚀 Generate TAFOR + TREND"):
         wind = next((p for p in parts if p.endswith("KT")), "09005KT")
         vis = next((p for p in parts if p.isdigit() or "9999" in p), "9999")
         cloud = next((p for p in parts if p.startswith(("FEW", "SCT", "BKN", "OVC"))), "FEW020")
+        wx = next((p for p in parts if any(w in p for w in ["RA", "TS", "SH", "FG", "DZ"])), "")
     except Exception:
-        wind, vis, cloud = "09005KT", "9999", "FEW020"
+        wind, vis, cloud, wx = "09005KT", "9999", "FEW020", ""
 
     # === Header TAF ===
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
@@ -58,10 +59,14 @@ if st.button("🚀 Generate TAFOR + TREND"):
     # === TREND otomatis (durasi 1 jam) ===
     trend_start = issue_dt
     trend_end = trend_start + timedelta(hours=1)
-    trend_lines = [
-        f"TEMPO TL{trend_end.strftime('%d%H%M')} 5000 SHRA SCT020CB",
-        f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind} {vis} {cloud}"
-    ]
+
+    if wx:  # ada cuaca signifikan di METAR
+        trend_lines = [
+            f"TEMPO TL{trend_end.strftime('%d%H%M')} 5000 {wx} SCT020CB",
+            f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind} {vis} {cloud}"
+        ]
+    else:  # tidak ada fenomena signifikan
+        trend_lines = ["NOSIG"]
 
     tafor_html = "<br>".join(tafor_lines)
     trend_html = "<br>".join(trend_lines)
