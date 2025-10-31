@@ -1,6 +1,5 @@
 import streamlit as st
-from datetime import datetime, timedelta
-import re
+from datetime import datetime, timedelta, time
 
 st.set_page_config(page_title="🛫 Auto TAFOR + TREND — WARR (Juanda)", layout="centered")
 
@@ -8,13 +7,17 @@ st.markdown("## 🛫 Auto TAFOR + TREND — WARR (Juanda)")
 st.write("Fusion: METAR (OGIMET/NOAA) + Open-Meteo (+BMKG optional). Output: TAF-like + TREND otomatis + grafik.")
 st.divider()
 
-# === Input waktu issue ===
-col1, col2, col3 = st.columns(3)
+# === Pilihan jam issue penting ===
+st.markdown("### ⏰ Pilih Jam Issue (UTC)")
+important_hours = [0, 6, 12, 18]
+selected_hour = st.selectbox("Jam issue (UTC)", important_hours, index=important_hours.index(6))
+selected_time = time(selected_hour, 0)
+
+# === Input waktu issue dan validitas ===
+col1, col2 = st.columns(2)
 with col1:
     issue_date = st.date_input("📅 Issue date (UTC)", datetime.utcnow().date())
 with col2:
-    issue_time = st.time_input("🕓 Issue time (UTC)", datetime.utcnow().time())
-with col3:
     validity = st.number_input("🕐 Validity (hours)", min_value=6, max_value=36, value=24, step=6)
 
 # === Input METAR ===
@@ -23,8 +26,8 @@ metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)",
                            height=100)
 
 if st.button("🚀 Generate TAFOR + TREND"):
-    # Gabungkan tanggal dan waktu issue
-    issue_dt = datetime.combine(issue_date, issue_time)
+    # Gunakan jam issue yang dipilih
+    issue_dt = datetime.combine(issue_date, selected_time)
     valid_to = issue_dt + timedelta(hours=validity)
 
     # === Parsing METAR ===
@@ -33,23 +36,13 @@ if st.button("🚀 Generate TAFOR + TREND"):
         wind = next((p for p in parts if p.endswith("KT")), "09005KT")
         vis = next((p for p in parts if p.isdigit() or "9999" in p), "9999")
         cloud = next((p for p in parts if p.startswith(("FEW", "SCT", "BKN", "OVC"))), "FEW020")
-
-        # Ekstrak jam observasi dari METAR (contoh: 280430Z → 04:30Z)
-        match = re.search(r"\d{6}Z", metar_input)
-        if match:
-            metar_time_str = match.group(0)
-            obs_hour = int(metar_time_str[2:4])
-            obs_min = int(metar_time_str[4:6])
-        else:
-            obs_hour, obs_min = issue_dt.hour, issue_dt.minute
     except Exception:
         wind, vis, cloud = "09005KT", "9999", "FEW020"
-        obs_hour, obs_min = issue_dt.hour, issue_dt.minute
 
     # === Header TAF ===
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
 
-    # === Periode perubahan (BECMG) ===
+    # === BECMG (perubahan dalam periode TAF) ===
     becmg1_start = issue_dt + timedelta(hours=4)
     becmg1_end = becmg1_start + timedelta(hours=5)
     becmg2_start = issue_dt + timedelta(hours=10)
@@ -62,31 +55,29 @@ if st.button("🚀 Generate TAFOR + TREND"):
         f"BECMG {becmg2_start.strftime('%d%H')}/{becmg2_end.strftime('%d%H')} 24005KT 9999 SCT020"
     ]
 
-    # === TREND otomatis: maksimal 2 jam dari waktu pengamatan METAR ===
-    metar_dt = datetime.utcnow().replace(hour=obs_hour, minute=obs_min, second=0, microsecond=0)
-    trend_start = metar_dt
-    trend_end = metar_dt + timedelta(hours=2)
+    # === TREND otomatis (maksimal 2 jam ke depan) ===
+    trend_end = issue_dt + timedelta(hours=2)
+    hour = issue_dt.hour
 
-    # Dinamika kondisi trend berdasarkan waktu observasi
-    if 0 <= obs_hour < 6:
+    if 0 <= hour < 6:
         trend_lines = [
-            f"TEMPO {trend_start.strftime('%d%H')}/{trend_end.strftime('%d%H')} 30005KT 6000 BR BKN015",
-            f"BECMG {trend_end.strftime('%d%H')}/{(trend_end + timedelta(hours=1)).strftime('%d%H')} 09005KT 9999 SCT020"
+            f"TEMPO {issue_dt.strftime('%d%H')}/{trend_end.strftime('%d%H')} 30005KT 6000 BR BKN015",
+            f"BECMG {(issue_dt + timedelta(hours=1)).strftime('%d%H')}/{trend_end.strftime('%d%H')} 09005KT 9999 SCT020"
         ]
-    elif 6 <= obs_hour < 12:
+    elif 6 <= hour < 12:
         trend_lines = [
-            f"TEMPO {trend_start.strftime('%d%H')}/{trend_end.strftime('%d%H')} 25010KT 4000 SHRA BKN020",
-            f"BECMG {trend_end.strftime('%d%H')}/{(trend_end + timedelta(hours=1)).strftime('%d%H')} 09005KT 9999 SCT025"
+            f"TEMPO {issue_dt.strftime('%d%H')}/{trend_end.strftime('%d%H')} 25010KT 4000 SHRA BKN020",
+            f"BECMG {(issue_dt + timedelta(hours=1)).strftime('%d%H')}/{trend_end.strftime('%d%H')} 09005KT 9999 SCT025"
         ]
-    elif 12 <= obs_hour < 18:
+    elif 12 <= hour < 18:
         trend_lines = [
-            f"TEMPO {trend_start.strftime('%d%H')}/{trend_end.strftime('%d%H')} 27005KT 8000 -RA SCT030",
-            f"BECMG {trend_end.strftime('%d%H')}/{(trend_end + timedelta(hours=1)).strftime('%d%H')} 09005KT CAVOK"
+            f"TEMPO {issue_dt.strftime('%d%H')}/{trend_end.strftime('%d%H')} 27005KT 8000 -RA SCT030",
+            f"BECMG {(issue_dt + timedelta(hours=1)).strftime('%d%H')}/{trend_end.strftime('%d%H')} 09005KT CAVOK"
         ]
     else:
         trend_lines = [
-            f"TEMPO {trend_start.strftime('%d%H')}/{trend_end.strftime('%d%H')} 24005KT 5000 SHRA BKN020",
-            f"BECMG {trend_end.strftime('%d%H')}/{(trend_end + timedelta(hours=1)).strftime('%d%H')} 09005KT 9999 FEW025"
+            f"TEMPO {issue_dt.strftime('%d%H')}/{trend_end.strftime('%d%H')} 26005KT 7000 HZ BKN020",
+            f"BECMG {(issue_dt + timedelta(hours=1)).strftime('%d%H')}/{trend_end.strftime('%d%H')} 09005KT 9999 SCT025"
         ]
 
     tafor_html = "<br>".join(tafor_lines)
@@ -119,7 +110,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("### 🌦️ TREND (Tambahan Otomatis)")
+    st.markdown("### 🌦️ TREND (Tambahan Otomatis, maks. 2 jam ke depan)")
     st.markdown(f"""
         <div style='padding:15px;border:2px solid #777;border-radius:10px;background-color:#f4f4f4;'>
             <p style='color:#111;font-weight:700;font-size:16px;line-height:1.8;font-family:monospace;'>{trend_html}</p>
