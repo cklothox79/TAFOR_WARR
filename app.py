@@ -51,11 +51,23 @@ if st.button("🚀 Generate TAFOR + TREND"):
         f"BECMG {becmg2_start.strftime('%d%H')}/{becmg2_end.strftime('%d%H')} 24005KT 9999 SCT020"
     ]
 
-    # === TREND otomatis ===
-    trend_lines = [
-        "TREND TEMPO 2804/2806 30010KT 4000 SHRA BKN020",
-        "BECMG 2806/2808 09005KT 9999 SCT025"
-    ]
+    # === TREND otomatis (dinamis berdasarkan jam issue) ===
+    hour = issue_dt.hour
+    if 0 <= hour < 6:
+        trend_lines = [
+            f"TEMPO {issue_dt.strftime('%d%H')}/{(issue_dt + timedelta(hours=2)).strftime('%d%H')} 30005KT 6000 BR BKN015",
+            f"BECMG {(issue_dt + timedelta(hours=2)).strftime('%d%H')}/{(issue_dt + timedelta(hours=4)).strftime('%d%H')} 09005KT 9999 SCT020"
+        ]
+    elif 6 <= hour < 12:
+        trend_lines = [
+            f"TEMPO {issue_dt.strftime('%d%H')}/{(issue_dt + timedelta(hours=3)).strftime('%d%H')} 25010KT 4000 SHRA BKN020",
+            f"BECMG {(issue_dt + timedelta(hours=3)).strftime('%d%H')}/{(issue_dt + timedelta(hours=5)).strftime('%d%H')} 09005KT 9999 SCT025"
+        ]
+    else:
+        trend_lines = [
+            f"TEMPO {issue_dt.strftime('%d%H')}/{(issue_dt + timedelta(hours=4)).strftime('%d%H')} 27005KT 8000 -RA SCT030",
+            f"BECMG {(issue_dt + timedelta(hours=4)).strftime('%d%H')}/{(issue_dt + timedelta(hours=6)).strftime('%d%H')} 09005KT CAVOK"
+        ]
 
     tafor_html = "<br>".join(tafor_lines)
     trend_html = "<br>".join(trend_lines)
