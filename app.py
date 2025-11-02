@@ -1,7 +1,7 @@
 # app.py
 import streamlit as st
-from datetime import datetime, timedelta, timezone
-import requests, json, os, time
+from datetime import datetime, timedelta
+import requests, json, os
 
 # --------------------------------------------------------
 # 🧭 KONFIGURASI UTAMA
@@ -28,6 +28,32 @@ with col3:
     validity = st.number_input("🕐 Validity (hours)", min_value=6, max_value=36, value=24, step=6)
 
 metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)", "", height=100)
+
+# --------------------------------------------------------
+# 🔹 TOAST STYLE CSS
+# --------------------------------------------------------
+st.markdown("""
+    <style>
+    .toast {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background-color: #333;
+        color: white;
+        padding: 12px 18px;
+        border-radius: 10px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        z-index: 9999;
+        font-weight: 600;
+        animation: fadeInOut 5s ease forwards;
+    }
+    @keyframes fadeInOut {
+        0% { opacity: 0; transform: translateY(-20px); }
+        10%,90% { opacity: 1; transform: translateY(0); }
+        100% { opacity: 0; transform: translateY(-20px); }
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 
 # --------------------------------------------------------
@@ -65,7 +91,6 @@ def get_bmkg_forecast():
         else:
             raise Exception("HTTP status not 200")
     except Exception:
-        # fallback ke file lokal
         if os.path.exists("JSON_BMKG.txt"):
             with open("JSON_BMKG.txt", "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -75,7 +100,10 @@ def get_bmkg_forecast():
     try:
         now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
         cuaca_list = data["data"][0]["cuaca"][0][0]
-        nearest = min(cuaca_list, key=lambda c: abs(datetime.fromisoformat(c["datetime"].replace("Z", "+00:00")) - now_utc))
+        nearest = min(
+            cuaca_list,
+            key=lambda c: abs(datetime.fromisoformat(c["datetime"].replace("Z", "+00:00")) - now_utc)
+        )
         return {
             "status": "OK",
             "time": nearest["datetime"],
@@ -104,8 +132,10 @@ def get_openmeteo_forecast():
         if r.status_code == 200:
             data = r.json()
             now_hour = datetime.utcnow().hour
-            idx = min(range(len(data["hourly"]["time"])),
-                      key=lambda i: abs(datetime.fromisoformat(data["hourly"]["time"][i]).hour - now_hour))
+            idx = min(
+                range(len(data["hourly"]["time"])),
+                key=lambda i: abs(datetime.fromisoformat(data["hourly"]["time"][i]).hour - now_hour)
+            )
             return {
                 "status": "OK",
                 "temp": data["hourly"]["temperature_2m"][idx],
@@ -126,7 +156,6 @@ if st.button("🚀 Generate TAFOR + TREND"):
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
     valid_to = issue_dt + timedelta(hours=validity)
 
-    # --- Ambil data realtime
     metar = metar_input.strip() or get_metar_ogimet()
     bmkg_data = get_bmkg_forecast()
     openmeteo_data = get_openmeteo_forecast()
@@ -135,7 +164,6 @@ if st.button("🚀 Generate TAFOR + TREND"):
     openmeteo_status = openmeteo_data.get("status", "Unavailable")
     metar_status = "✅ Manual" if metar_input.strip() else ("OK" if metar else "Unavailable")
 
-    # --- Parsing METAR
     try:
         parts = metar.split()
         wind = next((p for p in parts if p.endswith("KT")), "09005KT")
@@ -145,7 +173,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     except Exception:
         wind, vis, cloud, wx = "09005KT", "9999", "FEW020", ""
 
-    # --- Fusi BMKG + OpenMeteo
+    # === FUSI
     if bmkg_status == "OK":
         wind_final = f"{int(bmkg_data['wind_dir']):03d}{int(round(float(bmkg_data['wind_spd'] or 5))):02d}KT"
         cloud_final = "BKN030" if (bmkg_data.get("clouds", 0) or 0) > 80 else "SCT025"
@@ -159,9 +187,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     else:
         wind_final, cloud_final, wx_final, vis_final = wind, cloud, wx, vis
 
-    # === Header TAF
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
-
     becmg1_start = issue_dt + timedelta(hours=4)
     becmg1_end = becmg1_start + timedelta(hours=5)
     becmg2_start = issue_dt + timedelta(hours=10)
@@ -173,22 +199,17 @@ if st.button("🚀 Generate TAFOR + TREND"):
         f"BECMG {becmg1_start.strftime('%d%H')}/{becmg1_end.strftime('%d%H')} 20005KT 8000 -RA SCT025 BKN040",
         f"BECMG {becmg2_start.strftime('%d%H')}/{becmg2_end.strftime('%d%H')} 24005KT 9999 SCT020"
     ]
-
     trend_start = issue_dt
     trend_end = trend_start + timedelta(hours=1)
 
-    if wx_final:
-        trend_lines = [
-            f"TEMPO TL{trend_end.strftime('%d%H%M')} 5000 {wx_final} SCT020CB",
-            f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind_final} {vis_final} {cloud_final}"
-        ]
-    else:
-        trend_lines = ["NOSIG"]
+    trend_lines = (
+        [f"TEMPO TL{trend_end.strftime('%d%H%M')} 5000 {wx_final} SCT020CB",
+         f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind_final} {vis_final} {cloud_final}"]
+        if wx_final else ["NOSIG"]
+    )
 
-    tafor_html = "<br>".join(tafor_lines)
-    trend_html = "<br>".join(trend_lines)
+    tafor_html, trend_html = "<br>".join(tafor_lines), "<br>".join(trend_lines)
 
-    # === Output UI
     st.success("✅ TAFOR + TREND generation complete!")
 
     st.subheader("📊 Ringkasan Sumber Data")
@@ -200,6 +221,8 @@ if st.button("🚀 Generate TAFOR + TREND"):
     | OGIMET (METAR) | OK |
     | METAR Input | {metar_status} |
     """)
+
+    st.markdown(f"<div class='toast'>🔄 Data berhasil diperbarui otomatis</div>", unsafe_allow_html=True)
 
     st.markdown("### 📡 METAR (Observasi Terakhir)")
     st.markdown(f"""
