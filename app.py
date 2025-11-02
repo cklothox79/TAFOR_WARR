@@ -1,4 +1,4 @@
-# app_pro.py
+# app_pro_analysis.py
 import streamlit as st
 from datetime import datetime, timedelta
 import requests, json, os
@@ -9,9 +9,6 @@ st.markdown("## 🛫 Auto TAFOR Pro — WARR (Juanda)")
 st.write("Fusi data real BMKG + Open-Meteo + METAR, sesuai format ICAO & Perka BMKG.")
 st.divider()
 
-# --------------------------------------------------------
-# KONFIGURASI
-# --------------------------------------------------------
 REFRESH_INTERVAL = 900
 
 col1, col2, col3 = st.columns(3)
@@ -27,9 +24,7 @@ with col3:
 
 metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)", "", height=100)
 
-# --------------------------------------------------------
-# DATA HANDLER
-# --------------------------------------------------------
+# === Fetch data sources ===
 @st.cache_data(ttl=REFRESH_INTERVAL)
 def get_metar():
     try:
@@ -53,7 +48,6 @@ def get_bmkg():
                 data = json.load(f)
         else:
             return {"status":"Unavailable"}
-
     try:
         now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
         cuaca = data["data"][0]["cuaca"][0][0]
@@ -90,17 +84,14 @@ def get_openmeteo():
     except:
         return {"status":"Unavailable"}
 
-# --------------------------------------------------------
-# LOGIKA METEOROLOGIS / ICAO + PERKA
-# --------------------------------------------------------
 def weather_to_icao(desc):
     if not desc: return ""
     desc = desc.lower()
     mapping = {
-        "hujan ringan":"-RA", "hujan":"RA", "hujan lebat":"+RA",
-        "berawan":"BKN", "awan banyak":"OVC",
-        "cerah":"FEW", "cerah berawan":"SCT",
-        "kabut":"FG", "berdebu":"DU", "badai petir":"TS", "gerimis":"DZ"
+        "hujan ringan":"-RA","hujan":"RA","hujan lebat":"+RA",
+        "berawan":"BKN","awan banyak":"OVC",
+        "cerah":"FEW","cerah berawan":"SCT",
+        "kabut":"FG","badai petir":"TS","gerimis":"DZ"
     }
     for key,val in mapping.items():
         if key in desc: return val
@@ -114,9 +105,7 @@ def tcc_to_cloud(tcc):
     elif tcc < 85: return "BKN030"
     else: return "OVC030"
 
-# --------------------------------------------------------
-# PROSES UTAMA
-# --------------------------------------------------------
+# === Generate TAFOR ===
 if st.button("🚀 Generate TAFOR + TREND"):
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
     valid_to = issue_dt + timedelta(hours=validity)
@@ -127,42 +116,33 @@ if st.button("🚀 Generate TAFOR + TREND"):
 
     bmkg_status, open_status = bmkg.get("status"), openm.get("status")
 
-    # === FUSI
     if bmkg_status=="OK":
         wind_dir, wind_spd = bmkg["wd"], bmkg["ws"]
         cloud = tcc_to_cloud(bmkg["tcc"])
         wx = weather_to_icao(bmkg["wx_desc"])
         vis = bmkg.get("vs","9999").replace("> ","")
+        rh, tcc = bmkg.get("hu"), bmkg.get("tcc")
     elif open_status=="OK":
         wind_dir, wind_spd = openm["wd"], openm["ws"]
         cloud = tcc_to_cloud(openm["tcc"])
-        wx, vis = "", "9999"
+        wx, vis, rh, tcc = "", "9999", openm["hu"], openm["tcc"]
     else:
-        wind_dir, wind_spd, cloud, wx, vis = 90,5,"FEW020","", "9999"
+        wind_dir, wind_spd, cloud, wx, vis, rh, tcc = 90,5,"FEW020","", "9999", None, None
 
     wind = f"{int(wind_dir):03d}{int(round(float(wind_spd))):02d}KT"
-
-    # === STRUKTUR TAF
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
     tafor_lines = [taf_header, f"{wind} {vis} {cloud} {wx}".strip()]
 
-    # aturan perubahan
     if "RA" in wx or "TS" in wx:
         tafor_lines.append(f"TEMPO {issue_dt.strftime('%d%H')}/{(issue_dt+timedelta(hours=2)).strftime('%d%H')} 4000 {wx} SCT020CB")
     elif "FG" in wx:
         tafor_lines.append(f"BECMG {issue_dt.strftime('%d%H')}/{(issue_dt+timedelta(hours=1)).strftime('%d%H')} 2000 FG")
 
-    # TREND otomatis
-    if wx in ["RA","-RA","+RA","TS"]:
-        trend = f"TEMPO TL{(issue_dt+timedelta(hours=1)).strftime('%d%H%M')} 5000 {wx} SCT020CB"
-    else:
-        trend = "NOSIG"
+    trend = "NOSIG" if wx == "" else f"TEMPO TL{(issue_dt+timedelta(hours=1)).strftime('%d%H%M')} 5000 {wx} SCT020CB"
 
-    # === TAMPILAN
     taf_html = "<br>".join(tafor_lines)
-    trend_html = trend
 
-    st.success("✅ TAFOR + TREND profesional (ICAO + BMKG) selesai dibuat!")
+    st.success("✅ TAFOR + TREND profesional selesai dibuat!")
 
     st.subheader("📊 Ringkasan Sumber Data")
     st.write(f"""
@@ -183,8 +163,25 @@ if st.button("🚀 Generate TAFOR + TREND"):
     st.markdown("### 🌦️ TREND (Tambahan Otomatis)")
     st.markdown(f"""
         <div style='padding:15px;border:2px solid #777;border-radius:10px;background-color:#f4f4f4;'>
-            <p style='color:#111;font-weight:700;font-size:16px;font-family:monospace;line-height:1.8;'>{trend_html}</p>
+            <p style='color:#111;font-weight:700;font-size:16px;font-family:monospace;line-height:1.8;'>{trend}</p>
         </div>
         """, unsafe_allow_html=True)
 
-    st.info("💡 Format & isi TAFOR ini mengikuti ICAO Annex 3 dan Perka BMKG No.9/2021. Validasi tetap dilakukan forecaster sebelum publikasi operasional.")
+    # === Analisis Model Otomatis ===
+    st.markdown("### 🧠 Analisis Model (Interpretasi Otomatis)")
+    if tcc is not None and rh is not None:
+        sky = "Cerah" if tcc < 25 else "Berawan" if tcc < 70 else "Tertutup"
+        hum = "Kering" if rh < 60 else "Lembap" if rh < 80 else "Basah"
+        signif = "Tidak ada cuaca signifikan terdeteksi." if wx == "" else f"Fenomena signifikan terdeteksi: {wx}"
+        st.markdown(f"""
+        <div style='padding:12px;border:2px solid #888;border-radius:10px;background-color:#f6f6f6;'>
+            <b>RH:</b> {rh:.0f}% ({hum})<br>
+            <b>Tutupan awan:</b> {tcc:.0f}% ({sky})<br>
+            <b>Angin:</b> {wind} ({'lemah' if float(wind_spd)<10 else 'sedang' if float(wind_spd)<20 else 'kuat'})<br>
+            <b>Interpretasi:</b> {signif}
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("Analisis model tidak tersedia (data BMKG dan Open-Meteo tidak lengkap).")
+
+    st.info("💡 TAFOR mengikuti ICAO Annex 3 & Perka BMKG No.9/2021. Validasi tetap oleh forecaster sebelum publikasi.")
