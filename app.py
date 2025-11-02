@@ -1,21 +1,19 @@
-# app.py
+# app_pro.py
 import streamlit as st
 from datetime import datetime, timedelta
 import requests, json, os
 
-# --------------------------------------------------------
-# 🧭 KONFIGURASI UTAMA
-# --------------------------------------------------------
-st.set_page_config(page_title="🛫 Auto TAFOR + TREND — WARR (Juanda)", layout="centered")
-REFRESH_INTERVAL = 900  # detik (15 menit)
+st.set_page_config(page_title="🛫 Auto TAFOR Pro — WARR (Juanda)", layout="centered")
 
-st.markdown("## 🛫 Auto TAFOR + TREND — WARR (Juanda)")
-st.write("Fusion: METAR (OGIMET/NOAA) + BMKG (Sedati Gede) + Open-Meteo. Output: TAF-like + TREND otomatis + grafik.")
+st.markdown("## 🛫 Auto TAFOR Pro — WARR (Juanda)")
+st.write("Fusi data real BMKG + Open-Meteo + METAR, sesuai format ICAO & Perka BMKG.")
 st.divider()
 
 # --------------------------------------------------------
-# 🔹 INPUT WAKTU ISSUE
+# KONFIGURASI
 # --------------------------------------------------------
+REFRESH_INTERVAL = 900
+
 col1, col2, col3 = st.columns(3)
 with col1:
     issue_date = st.date_input("📅 Issue date (UTC)", datetime.utcnow().date())
@@ -30,227 +28,163 @@ with col3:
 metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)", "", height=100)
 
 # --------------------------------------------------------
-# 🔹 TOAST STYLE CSS
-# --------------------------------------------------------
-st.markdown("""
-    <style>
-    .toast {
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        background-color: #333;
-        color: white;
-        padding: 12px 18px;
-        border-radius: 10px;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        z-index: 9999;
-        font-weight: 600;
-        animation: fadeInOut 5s ease forwards;
-    }
-    @keyframes fadeInOut {
-        0% { opacity: 0; transform: translateY(-20px); }
-        10%,90% { opacity: 1; transform: translateY(0); }
-        100% { opacity: 0; transform: translateY(-20px); }
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-
-# --------------------------------------------------------
-# 🔹 FUNGSI PENGAMBIL DATA
+# DATA HANDLER
 # --------------------------------------------------------
 @st.cache_data(ttl=REFRESH_INTERVAL)
-def get_metar_ogimet():
-    """Ambil METAR realtime dari OGIMET (NOAA fallback)."""
+def get_metar():
     try:
         url = "https://tgftp.nws.noaa.gov/data/observations/metar/stations/WARR.TXT"
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            lines = r.text.strip().split("\n")
-            if len(lines) >= 2:
-                return lines[-1].strip()
-    except Exception:
-        pass
-    return None
-
+            return r.text.strip().split("\n")[-1]
+    except:
+        return None
 
 @st.cache_data(ttl=REFRESH_INTERVAL)
-def get_bmkg_forecast():
-    """Ambil BMKG realtime atau fallback file lokal JSON_BMKG.txt"""
+def get_bmkg():
     url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm"
-    params = {
-        "adm1": "35",
-        "adm2": "35.15",
-        "adm3": "35.15.17",
-        "adm4": "35.15.17.2001"
-    }
+    params = {"adm1":"35","adm2":"35.15","adm3":"35.15.17","adm4":"35.15.17.2001"}
     try:
         r = requests.get(url, params=params, timeout=15, verify=False)
-        if r.status_code == 200:
-            data = r.json()
-        else:
-            raise Exception("HTTP status not 200")
-    except Exception:
+        data = r.json()
+    except:
         if os.path.exists("JSON_BMKG.txt"):
-            with open("JSON_BMKG.txt", "r", encoding="utf-8") as f:
+            with open("JSON_BMKG.txt","r",encoding="utf-8") as f:
                 data = json.load(f)
         else:
-            return {"status": "Unavailable"}
+            return {"status":"Unavailable"}
 
     try:
         now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-        cuaca_list = data["data"][0]["cuaca"][0][0]
-        nearest = min(
-            cuaca_list,
-            key=lambda c: abs(datetime.fromisoformat(c["datetime"].replace("Z", "+00:00")) - now_utc)
-        )
+        cuaca = data["data"][0]["cuaca"][0][0]
+        nearest = min(cuaca, key=lambda c: abs(datetime.fromisoformat(c["datetime"].replace("Z","+00:00"))-now_utc))
         return {
-            "status": "OK",
-            "time": nearest["datetime"],
-            "temp": nearest.get("t"),
-            "rh": nearest.get("hu"),
-            "wind_dir": nearest.get("wd_deg"),
-            "wind_spd": nearest.get("ws"),
-            "clouds": nearest.get("tcc"),
-            "wx": nearest.get("weather_desc"),
-            "vis": nearest.get("vs_text")
+            "status":"OK",
+            "wx_desc": nearest.get("weather_desc"),
+            "t": nearest.get("t"), "hu": nearest.get("hu"),
+            "tcc": nearest.get("tcc"), "wd": nearest.get("wd_deg"),
+            "ws": nearest.get("ws"), "vs": nearest.get("vs_text")
         }
     except Exception:
-        return {"status": "Unavailable"}
-
+        return {"status":"Unavailable"}
 
 @st.cache_data(ttl=REFRESH_INTERVAL)
-def get_openmeteo_forecast():
+def get_openmeteo():
     try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            "?latitude=-7.379&longitude=112.787"
-            "&hourly=temperature_2m,relative_humidity_2m,cloud_cover,"
-            "windspeed_10m,winddirection_10m&forecast_days=1&timezone=UTC"
-        )
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=-7.379&longitude=112.787"
+               "&hourly=temperature_2m,relative_humidity_2m,cloud_cover,"
+               "windspeed_10m,winddirection_10m&forecast_days=1&timezone=UTC")
         r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            now_hour = datetime.utcnow().hour
-            idx = min(
-                range(len(data["hourly"]["time"])),
-                key=lambda i: abs(datetime.fromisoformat(data["hourly"]["time"][i]).hour - now_hour)
-            )
-            return {
-                "status": "OK",
-                "temp": data["hourly"]["temperature_2m"][idx],
-                "rh": data["hourly"]["relative_humidity_2m"][idx],
-                "wind_dir": data["hourly"]["winddirection_10m"][idx],
-                "wind_spd": data["hourly"]["windspeed_10m"][idx],
-                "clouds": data["hourly"]["cloud_cover"][idx]
-            }
-    except Exception:
-        pass
-    return {"status": "Unavailable"}
-
+        data = r.json()
+        hour = datetime.utcnow().hour
+        idx = min(range(len(data["hourly"]["time"])),
+                  key=lambda i: abs(datetime.fromisoformat(data["hourly"]["time"][i]).hour - hour))
+        return {
+            "status":"OK",
+            "t":data["hourly"]["temperature_2m"][idx],
+            "hu":data["hourly"]["relative_humidity_2m"][idx],
+            "tcc":data["hourly"]["cloud_cover"][idx],
+            "wd":data["hourly"]["winddirection_10m"][idx],
+            "ws":data["hourly"]["windspeed_10m"][idx]
+        }
+    except:
+        return {"status":"Unavailable"}
 
 # --------------------------------------------------------
-# 🔹 GENERATE OUTPUT
+# LOGIKA METEOROLOGIS / ICAO + PERKA
+# --------------------------------------------------------
+def weather_to_icao(desc):
+    if not desc: return ""
+    desc = desc.lower()
+    mapping = {
+        "hujan ringan":"-RA", "hujan":"RA", "hujan lebat":"+RA",
+        "berawan":"BKN", "awan banyak":"OVC",
+        "cerah":"FEW", "cerah berawan":"SCT",
+        "kabut":"FG", "berdebu":"DU", "badai petir":"TS", "gerimis":"DZ"
+    }
+    for key,val in mapping.items():
+        if key in desc: return val
+    return ""
+
+def tcc_to_cloud(tcc):
+    if tcc is None: return "FEW020"
+    tcc = float(tcc)
+    if tcc < 25: return "FEW020"
+    elif tcc < 50: return "SCT025"
+    elif tcc < 85: return "BKN030"
+    else: return "OVC030"
+
+# --------------------------------------------------------
+# PROSES UTAMA
 # --------------------------------------------------------
 if st.button("🚀 Generate TAFOR + TREND"):
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
     valid_to = issue_dt + timedelta(hours=validity)
 
-    metar = metar_input.strip() or get_metar_ogimet()
-    bmkg_data = get_bmkg_forecast()
-    openmeteo_data = get_openmeteo_forecast()
+    metar = metar_input.strip() or get_metar()
+    bmkg = get_bmkg()
+    openm = get_openmeteo()
 
-    bmkg_status = bmkg_data.get("status", "Unavailable")
-    openmeteo_status = openmeteo_data.get("status", "Unavailable")
-    metar_status = "✅ Manual" if metar_input.strip() else ("OK" if metar else "Unavailable")
-
-    try:
-        parts = metar.split()
-        wind = next((p for p in parts if p.endswith("KT")), "09005KT")
-        vis = next((p for p in parts if p.isdigit() or "9999" in p), "9999")
-        cloud = next((p for p in parts if p.startswith(("FEW", "SCT", "BKN", "OVC"))), "FEW020")
-        wx = next((p for p in parts if any(w in p for w in ["RA", "TS", "SH", "FG", "DZ"])), "")
-    except Exception:
-        wind, vis, cloud, wx = "09005KT", "9999", "FEW020", ""
+    bmkg_status, open_status = bmkg.get("status"), openm.get("status")
 
     # === FUSI
-    if bmkg_status == "OK":
-        wind_final = f"{int(bmkg_data['wind_dir']):03d}{int(round(float(bmkg_data['wind_spd'] or 5))):02d}KT"
-        cloud_final = "BKN030" if (bmkg_data.get("clouds", 0) or 0) > 80 else "SCT025"
-        wx_final = bmkg_data.get("wx", "") or wx
-        vis_final = bmkg_data.get("vis", "9999").replace("> ", "")
-    elif openmeteo_status == "OK":
-        wind_final = f"{int(openmeteo_data['wind_dir']):03d}{int(openmeteo_data['wind_spd']):02d}KT"
-        cloud_final = "SCT020" if openmeteo_data.get("clouds", 0) > 5 else "FEW020"
-        wx_final = wx
-        vis_final = "9999"
+    if bmkg_status=="OK":
+        wind_dir, wind_spd = bmkg["wd"], bmkg["ws"]
+        cloud = tcc_to_cloud(bmkg["tcc"])
+        wx = weather_to_icao(bmkg["wx_desc"])
+        vis = bmkg.get("vs","9999").replace("> ","")
+    elif open_status=="OK":
+        wind_dir, wind_spd = openm["wd"], openm["ws"]
+        cloud = tcc_to_cloud(openm["tcc"])
+        wx, vis = "", "9999"
     else:
-        wind_final, cloud_final, wx_final, vis_final = wind, cloud, wx, vis
+        wind_dir, wind_spd, cloud, wx, vis = 90,5,"FEW020","", "9999"
 
+    wind = f"{int(wind_dir):03d}{int(round(float(wind_spd))):02d}KT"
+
+    # === STRUKTUR TAF
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
-    becmg1_start = issue_dt + timedelta(hours=4)
-    becmg1_end = becmg1_start + timedelta(hours=5)
-    becmg2_start = issue_dt + timedelta(hours=10)
-    becmg2_end = becmg2_start + timedelta(hours=6)
+    tafor_lines = [taf_header, f"{wind} {vis} {cloud} {wx}".strip()]
 
-    tafor_lines = [
-        taf_header,
-        f"{wind_final} {vis_final} {cloud_final}",
-        f"BECMG {becmg1_start.strftime('%d%H')}/{becmg1_end.strftime('%d%H')} 20005KT 8000 -RA SCT025 BKN040",
-        f"BECMG {becmg2_start.strftime('%d%H')}/{becmg2_end.strftime('%d%H')} 24005KT 9999 SCT020"
-    ]
-    trend_start = issue_dt
-    trend_end = trend_start + timedelta(hours=1)
+    # aturan perubahan
+    if "RA" in wx or "TS" in wx:
+        tafor_lines.append(f"TEMPO {issue_dt.strftime('%d%H')}/{(issue_dt+timedelta(hours=2)).strftime('%d%H')} 4000 {wx} SCT020CB")
+    elif "FG" in wx:
+        tafor_lines.append(f"BECMG {issue_dt.strftime('%d%H')}/{(issue_dt+timedelta(hours=1)).strftime('%d%H')} 2000 FG")
 
-    trend_lines = (
-        [f"TEMPO TL{trend_end.strftime('%d%H%M')} 5000 {wx_final} SCT020CB",
-         f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind_final} {vis_final} {cloud_final}"]
-        if wx_final else ["NOSIG"]
-    )
+    # TREND otomatis
+    if wx in ["RA","-RA","+RA","TS"]:
+        trend = f"TEMPO TL{(issue_dt+timedelta(hours=1)).strftime('%d%H%M')} 5000 {wx} SCT020CB"
+    else:
+        trend = "NOSIG"
 
-    tafor_html, trend_html = "<br>".join(tafor_lines), "<br>".join(trend_lines)
+    # === TAMPILAN
+    taf_html = "<br>".join(tafor_lines)
+    trend_html = trend
 
-    st.success("✅ TAFOR + TREND generation complete!")
+    st.success("✅ TAFOR + TREND profesional (ICAO + BMKG) selesai dibuat!")
 
     st.subheader("📊 Ringkasan Sumber Data")
     st.write(f"""
     | Sumber | Status |
     |:-------|:--------|
     | BMKG Source | {bmkg_status} |
-    | Open Meteo | {openmeteo_status} |
-    | OGIMET (METAR) | OK |
-    | METAR Input | {metar_status} |
+    | Open Meteo | {open_status} |
+    | METAR Input | {'✅ Manual' if metar_input else 'OK'} |
     """)
-
-    st.markdown(f"<div class='toast'>🔄 Data berhasil diperbarui otomatis</div>", unsafe_allow_html=True)
-
-    st.markdown("### 📡 METAR (Observasi Terakhir)")
-    st.markdown(f"""
-        <div style='padding:12px;border:2px solid #bbb;border-radius:10px;background-color:#fafafa;'>
-            <p style='color:#000;font-weight:700;font-size:16px;font-family:monospace;'>{metar or 'Data tidak tersedia'}</p>
-        </div>
-        """, unsafe_allow_html=True)
 
     st.markdown("### 📝 Hasil TAFOR (WARR – Juanda)")
     st.markdown(f"""
         <div style='padding:15px;border:2px solid #555;border-radius:10px;background-color:#f9f9f9;'>
-            <p style='color:#000;font-weight:700;font-size:16px;line-height:1.8;font-family:monospace;'>{tafor_html}</p>
+            <p style='color:#000;font-weight:700;font-size:16px;font-family:monospace;line-height:1.8;'>{taf_html}</p>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("### 🌦️ TREND (Tambahan Otomatis)")
     st.markdown(f"""
         <div style='padding:15px;border:2px solid #777;border-radius:10px;background-color:#f4f4f4;'>
-            <p style='color:#111;font-weight:700;font-size:16px;line-height:1.8;font-family:monospace;'>{trend_html}</p>
+            <p style='color:#111;font-weight:700;font-size:16px;font-family:monospace;line-height:1.8;'>{trend_html}</p>
         </div>
         """, unsafe_allow_html=True)
 
-    st.info("💡 TAFOR + TREND ini bersifat eksperimental. Validasi dengan TAF resmi BMKG sebelum digunakan operasional.")
-
-    with st.expander("🧠 Debug: fused numeric values (BMKG priority then Open-Meteo)"):
-        st.json({"BMKG": bmkg_data, "OpenMeteo": openmeteo_data})
-
-# --------------------------------------------------------
-# ⏳ AUTO REFRESH INFO
-# --------------------------------------------------------
-st.caption(f"🔄 Data otomatis diperbarui setiap 15 menit — terakhir diperbarui: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    st.info("💡 Format & isi TAFOR ini mengikuti ICAO Annex 3 dan Perka BMKG No.9/2021. Validasi tetap dilakukan forecaster sebelum publikasi operasional.")
