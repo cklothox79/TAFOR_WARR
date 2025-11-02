@@ -1,15 +1,21 @@
 # app.py
 import streamlit as st
 from datetime import datetime, timedelta, timezone
-import requests, json, os
+import requests, json, os, time
 
+# --------------------------------------------------------
+# 🧭 KONFIGURASI UTAMA
+# --------------------------------------------------------
 st.set_page_config(page_title="🛫 Auto TAFOR + TREND — WARR (Juanda)", layout="centered")
+REFRESH_INTERVAL = 900  # detik (15 menit)
 
 st.markdown("## 🛫 Auto TAFOR + TREND — WARR (Juanda)")
 st.write("Fusion: METAR (OGIMET/NOAA) + BMKG (Sedati Gede) + Open-Meteo. Output: TAF-like + TREND otomatis + grafik.")
 st.divider()
 
-# === Input waktu issue ===
+# --------------------------------------------------------
+# 🔹 INPUT WAKTU ISSUE
+# --------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 with col1:
     issue_date = st.date_input("📅 Issue date (UTC)", datetime.utcnow().date())
@@ -21,14 +27,15 @@ with col2:
 with col3:
     validity = st.number_input("🕐 Validity (hours)", min_value=6, max_value=36, value=24, step=6)
 
-# === Input METAR ===
 metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)", "", height=100)
 
 
-# -----------------------------------------------------------------
+# --------------------------------------------------------
 # 🔹 FUNGSI PENGAMBIL DATA
-# -----------------------------------------------------------------
+# --------------------------------------------------------
+@st.cache_data(ttl=REFRESH_INTERVAL)
 def get_metar_ogimet():
+    """Ambil METAR realtime dari OGIMET (NOAA fallback)."""
     try:
         url = "https://tgftp.nws.noaa.gov/data/observations/metar/stations/WARR.TXT"
         r = requests.get(url, timeout=10)
@@ -41,6 +48,7 @@ def get_metar_ogimet():
     return None
 
 
+@st.cache_data(ttl=REFRESH_INTERVAL)
 def get_bmkg_forecast():
     """Ambil BMKG realtime atau fallback file lokal JSON_BMKG.txt"""
     url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm"
@@ -65,7 +73,6 @@ def get_bmkg_forecast():
             return {"status": "Unavailable"}
 
     try:
-        # ambil cuaca jam UTC sekarang
         now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
         cuaca_list = data["data"][0]["cuaca"][0][0]
         nearest = min(cuaca_list, key=lambda c: abs(datetime.fromisoformat(c["datetime"].replace("Z", "+00:00")) - now_utc))
@@ -84,6 +91,7 @@ def get_bmkg_forecast():
         return {"status": "Unavailable"}
 
 
+@st.cache_data(ttl=REFRESH_INTERVAL)
 def get_openmeteo_forecast():
     try:
         url = (
@@ -111,14 +119,14 @@ def get_openmeteo_forecast():
     return {"status": "Unavailable"}
 
 
-# -----------------------------------------------------------------
+# --------------------------------------------------------
 # 🔹 GENERATE OUTPUT
-# -----------------------------------------------------------------
+# --------------------------------------------------------
 if st.button("🚀 Generate TAFOR + TREND"):
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
     valid_to = issue_dt + timedelta(hours=validity)
 
-    # --- Data Sources ---
+    # --- Ambil data realtime
     metar = metar_input.strip() or get_metar_ogimet()
     bmkg_data = get_bmkg_forecast()
     openmeteo_data = get_openmeteo_forecast()
@@ -127,7 +135,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     openmeteo_status = openmeteo_data.get("status", "Unavailable")
     metar_status = "✅ Manual" if metar_input.strip() else ("OK" if metar else "Unavailable")
 
-    # --- Parsing METAR ---
+    # --- Parsing METAR
     try:
         parts = metar.split()
         wind = next((p for p in parts if p.endswith("KT")), "09005KT")
@@ -137,7 +145,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     except Exception:
         wind, vis, cloud, wx = "09005KT", "9999", "FEW020", ""
 
-    # --- Fusi BMKG + OpenMeteo ---
+    # --- Fusi BMKG + OpenMeteo
     if bmkg_status == "OK":
         wind_final = f"{int(bmkg_data['wind_dir']):03d}{int(round(float(bmkg_data['wind_spd'] or 5))):02d}KT"
         cloud_final = "BKN030" if (bmkg_data.get("clouds", 0) or 0) > 80 else "SCT025"
@@ -151,7 +159,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     else:
         wind_final, cloud_final, wx_final, vis_final = wind, cloud, wx, vis
 
-    # === Header TAF ===
+    # === Header TAF
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
 
     becmg1_start = issue_dt + timedelta(hours=4)
@@ -180,7 +188,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     tafor_html = "<br>".join(tafor_lines)
     trend_html = "<br>".join(trend_lines)
 
-    # === Output (Tampilan sama persis) ===
+    # === Output UI
     st.success("✅ TAFOR + TREND generation complete!")
 
     st.subheader("📊 Ringkasan Sumber Data")
@@ -218,3 +226,8 @@ if st.button("🚀 Generate TAFOR + TREND"):
 
     with st.expander("🧠 Debug: fused numeric values (BMKG priority then Open-Meteo)"):
         st.json({"BMKG": bmkg_data, "OpenMeteo": openmeteo_data})
+
+# --------------------------------------------------------
+# ⏳ AUTO REFRESH INFO
+# --------------------------------------------------------
+st.caption(f"🔄 Data otomatis diperbarui setiap 15 menit — terakhir diperbarui: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
