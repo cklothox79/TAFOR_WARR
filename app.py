@@ -1,7 +1,7 @@
 # app.py
 import streamlit as st
-from datetime import datetime, timedelta
-import requests
+from datetime import datetime, timedelta, timezone
+import requests, json, os
 
 st.set_page_config(page_title="🛫 Auto TAFOR + TREND — WARR (Juanda)", layout="centered")
 
@@ -24,24 +24,25 @@ with col3:
 # === Input METAR ===
 metar_input = st.text_area("✈️ Masukkan METAR terakhir (opsional)", "", height=100)
 
-# === FUNGSI PENGAMBIL DATA ===
 
+# -----------------------------------------------------------------
+# 🔹 FUNGSI PENGAMBIL DATA
+# -----------------------------------------------------------------
 def get_metar_ogimet():
-    """Ambil METAR realtime dari OGIMET (NOAA fallback)."""
     try:
         url = "https://tgftp.nws.noaa.gov/data/observations/metar/stations/WARR.TXT"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            lines = resp.text.strip().split("\n")
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            lines = r.text.strip().split("\n")
             if len(lines) >= 2:
-                return lines[-1]
+                return lines[-1].strip()
     except Exception:
         pass
     return None
 
 
 def get_bmkg_forecast():
-    """Ambil data cuaca BMKG (Sedati Gede ADM4)."""
+    """Ambil BMKG realtime atau fallback file lokal JSON_BMKG.txt"""
     url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm"
     params = {
         "adm1": "35",
@@ -50,29 +51,40 @@ def get_bmkg_forecast():
         "adm4": "35.15.17.2001"
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, timeout=15, verify=False)
         if r.status_code == 200:
             data = r.json()
-            forecasts = data.get("data", {}).get("forecasts", [])
-            if forecasts:
-                f = forecasts[0]
-                return {
-                    "status": "OK",
-                    "time": f.get("datetime"),
-                    "temp": f.get("t", {}).get("value"),
-                    "rh": f.get("hu", {}).get("value"),
-                    "wind_dir": f.get("wd", {}).get("value"),
-                    "wind_spd": f.get("ws", {}).get("value"),
-                    "clouds": f.get("tcc", {}).get("value"),
-                    "wx": f.get("weather", {}).get("desc")
-                }
+        else:
+            raise Exception("HTTP status not 200")
     except Exception:
-        pass
-    return {"status": "Unavailable"}
+        # fallback ke file lokal
+        if os.path.exists("JSON_BMKG.txt"):
+            with open("JSON_BMKG.txt", "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            return {"status": "Unavailable"}
+
+    try:
+        # ambil cuaca jam UTC sekarang
+        now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        cuaca_list = data["data"][0]["cuaca"][0][0]
+        nearest = min(cuaca_list, key=lambda c: abs(datetime.fromisoformat(c["datetime"].replace("Z", "+00:00")) - now_utc))
+        return {
+            "status": "OK",
+            "time": nearest["datetime"],
+            "temp": nearest.get("t"),
+            "rh": nearest.get("hu"),
+            "wind_dir": nearest.get("wd_deg"),
+            "wind_spd": nearest.get("ws"),
+            "clouds": nearest.get("tcc"),
+            "wx": nearest.get("weather_desc"),
+            "vis": nearest.get("vs_text")
+        }
+    except Exception:
+        return {"status": "Unavailable"}
 
 
 def get_openmeteo_forecast():
-    """Ambil data Open-Meteo untuk koordinat Juanda."""
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
@@ -99,9 +111,10 @@ def get_openmeteo_forecast():
     return {"status": "Unavailable"}
 
 
-# === MAIN PROCESS ===
+# -----------------------------------------------------------------
+# 🔹 GENERATE OUTPUT
+# -----------------------------------------------------------------
 if st.button("🚀 Generate TAFOR + TREND"):
-
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
     valid_to = issue_dt + timedelta(hours=validity)
 
@@ -124,17 +137,19 @@ if st.button("🚀 Generate TAFOR + TREND"):
     except Exception:
         wind, vis, cloud, wx = "09005KT", "9999", "FEW020", ""
 
-    # --- Fusi BMKG + OpenMeteo (prioritas BMKG) ---
+    # --- Fusi BMKG + OpenMeteo ---
     if bmkg_status == "OK":
-        wind_final = f"{int(bmkg_data['wind_dir']):03d}{int(bmkg_data['wind_spd']):02d}KT"
-        cloud_final = "SCT020" if bmkg_data.get("clouds", 0) > 5 else "FEW020"
+        wind_final = f"{int(bmkg_data['wind_dir']):03d}{int(round(float(bmkg_data['wind_spd'] or 5))):02d}KT"
+        cloud_final = "BKN030" if (bmkg_data.get("clouds", 0) or 0) > 80 else "SCT025"
         wx_final = bmkg_data.get("wx", "") or wx
+        vis_final = bmkg_data.get("vis", "9999").replace("> ", "")
     elif openmeteo_status == "OK":
         wind_final = f"{int(openmeteo_data['wind_dir']):03d}{int(openmeteo_data['wind_spd']):02d}KT"
         cloud_final = "SCT020" if openmeteo_data.get("clouds", 0) > 5 else "FEW020"
         wx_final = wx
+        vis_final = "9999"
     else:
-        wind_final, cloud_final, wx_final = wind, cloud, wx
+        wind_final, cloud_final, wx_final, vis_final = wind, cloud, wx, vis
 
     # === Header TAF ===
     taf_header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
@@ -146,7 +161,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
 
     tafor_lines = [
         taf_header,
-        f"{wind_final} {vis} {cloud_final}",
+        f"{wind_final} {vis_final} {cloud_final}",
         f"BECMG {becmg1_start.strftime('%d%H')}/{becmg1_end.strftime('%d%H')} 20005KT 8000 -RA SCT025 BKN040",
         f"BECMG {becmg2_start.strftime('%d%H')}/{becmg2_end.strftime('%d%H')} 24005KT 9999 SCT020"
     ]
@@ -157,7 +172,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     if wx_final:
         trend_lines = [
             f"TEMPO TL{trend_end.strftime('%d%H%M')} 5000 {wx_final} SCT020CB",
-            f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind_final} {vis} {cloud_final}"
+            f"BECMG {trend_start.strftime('%d%H%M')}/{trend_end.strftime('%d%H%M')} {wind_final} {vis_final} {cloud_final}"
         ]
     else:
         trend_lines = ["NOSIG"]
@@ -165,7 +180,7 @@ if st.button("🚀 Generate TAFOR + TREND"):
     tafor_html = "<br>".join(tafor_lines)
     trend_html = "<br>".join(trend_lines)
 
-    # === Output ===
+    # === Output (Tampilan sama persis) ===
     st.success("✅ TAFOR + TREND generation complete!")
 
     st.subheader("📊 Ringkasan Sumber Data")
