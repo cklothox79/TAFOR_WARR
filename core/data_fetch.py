@@ -1,7 +1,6 @@
 import requests
 import pandas as pd
 
-# === Ambil data dari berbagai sumber ===
 def fetch_bmkg(json_url):
     try:
         df = pd.read_json(json_url)
@@ -12,7 +11,6 @@ def fetch_bmkg(json_url):
         return pd.DataFrame()
 
 def fetch_openmeteo(lat, lon, model="gfs"):
-    """model: gfs / icon / ecmwf"""
     base_url = f"https://api.open-meteo.com/v1/{model}"
     params = {
         "latitude": lat,
