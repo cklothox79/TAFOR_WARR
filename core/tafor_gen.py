@@ -2,8 +2,8 @@ import pandas as pd
 
 def tafor_generate(fused_df):
     """
-    Contoh sederhana generator TAF:
-    Mengambil rata-rata, mendeteksi perubahan signifikan.
+    Generator TAF sederhana: membaca nilai rata-rata & kondisi dominan.
+    Bisa dikembangkan ke versi probabilistik nantinya.
     """
     if fused_df.empty:
         return "TAF AUTO: Data tidak tersedia"
