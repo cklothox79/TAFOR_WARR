@@ -7,3 +7,4 @@ plotly
 matplotlib
 numpy
 scipy
+scikit-learn
