@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-# Bobot tiap model
+# Bobot model
 WEIGHTS = {
     "BMKG": 0.5,
     "ECMWF": 0.2,
@@ -10,6 +10,7 @@ WEIGHTS = {
 }
 
 def weighted_fusion(df):
+    """Gabungkan semua data model berdasarkan bobot sumber."""
     if df.empty:
         return pd.DataFrame()
     
