@@ -1,9 +1,8 @@
 # app.py
 """
-TAFOR Fusion Pro — Operational v2.4 (WARR / Sedati Gede)
-- Full Streamlit app with styled download buttons and ZIP export
-- Adds: daily logging to ./logs/, auto-alerts for PoP/Wind/High RH+CC
-ADM4: 35.15.17.2011 (Sedati Gede)
+TAFOR Fusion Pro — Operational v2.4 (WARR / Sedati Gede) — Enhanced
+- Lengkapkan bagian download, optimasi requests, perbaikan time handling
+- Perhatian: hasil harus divalidasi menurut ICAO Annex 3 dan Perka BMKG (Perka No.6/2024 dsb.)
 """
 
 import os
@@ -11,8 +10,10 @@ import io
 import json
 import logging
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 import math
+import ssl
+import warnings
 
 import streamlit as st
 import requests
@@ -36,13 +37,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # constants
 LAT, LON = -7.379, 112.787
+ICAO_STATION = "WARR"
 ADM4 = "35.15.17.2011"
 REFRESH_TTL = 600  # cache TTL seconds
 DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
-# -----------------------
+# session for HTTP (reuse connections)
+session = requests.Session()
+session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.4 (+https://example.org)"})
+
 # UI Inputs
-# -----------------------
 col1, col2, col3 = st.columns(3)
 with col1:
     issue_date = st.date_input("📅 Issue date (UTC)", datetime.utcnow().date())
@@ -59,8 +63,10 @@ bmkg_w = wcols[0].number_input("BMKG", 0.0, 1.0, value=DEFAULT_WEIGHTS["bmkg"], 
 ecmwf_w = wcols[1].number_input("ECMWF", 0.0, 1.0, value=DEFAULT_WEIGHTS["ecmwf"], step=0.05)
 icon_w = wcols[2].number_input("ICON", 0.0, 1.0, value=DEFAULT_WEIGHTS["icon"], step=0.05)
 gfs_w = wcols[3].number_input("GFS", 0.0, 1.0, value=DEFAULT_WEIGHTS["gfs"], step=0.05)
-sumw = bmkg_w + ecmwf_w + icon_w + gfs_w or 1.0
-weights = {"bmkg": bmkg_w / sumw, "ecmwf": ecmwf_w / sumw, "icon": icon_w / sumw, "gfs": gfs_w / sumw}
+_sumw = bmkg_w + ecmwf_w + icon_w + gfs_w
+if _sumw <= 0:
+    _sumw = 1.0
+weights = {"bmkg": bmkg_w / _sumw, "ecmwf": ecmwf_w / _sumw, "icon": icon_w / _sumw, "gfs": gfs_w / _sumw}
 st.caption(f"Normalized weights: {weights}")
 
 st.divider()
@@ -96,14 +102,13 @@ def safe_int(x, default=0):
         return default
 
 def weighted_mean(vals, ws):
+    # vals: iterable of numbers (may contain nan); ws: iterable of weights (float)
     if not vals or not ws:
         return np.nan
-    arr = np.array([np.nan if v is None else v for v in vals], dtype=float)
+    arr = np.array(vals, dtype=float)
     w = np.array(ws[:len(arr)], dtype=float)
-    if len(w) == 0:
-        return np.nan
     mask = ~np.isnan(arr)
-    if not mask.any():
+    if mask.sum() == 0:
         return np.nan
     w_mask = w[mask]
     if w_mask.sum() == 0:
@@ -129,20 +134,26 @@ def fetch_bmkg(adm4=ADM4, local_fallback="JSON_BMKG.txt"):
     url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm"
     params = {"adm1": "35", "adm2": "35.15", "adm3": "35.15.17", "adm4": adm4}
     try:
-        r = requests.get(url, params=params, timeout=15, verify=False)
+        r = session.get(url, params=params, timeout=15, verify=True)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
         logging.warning("BMKG API failed: %s", e)
+        # fallback to local file if exists
         if os.path.exists(local_fallback):
-            with open(local_fallback, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            try:
+                with open(local_fallback, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e2:
+                logging.warning("Local BMKG fallback read failed: %s", e2)
+                return {"status": "Unavailable"}
         else:
             return {"status": "Unavailable"}
     try:
         cuaca = data["data"][0]["cuaca"][0][0]
         return {"status": "OK", "raw": data, "cuaca": cuaca}
     except Exception:
+        # attempt to flatten various BMKG structures
         try:
             c = data.get("data", [{}])[0].get("cuaca")
             if isinstance(c, list):
@@ -169,7 +180,7 @@ def fetch_openmeteo(model):
         "timezone": "UTC"
     }
     try:
-        r = requests.get(base, params=params, timeout=15)
+        r = session.get(base, params=params, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -177,9 +188,10 @@ def fetch_openmeteo(model):
         return None
 
 @st.cache_data(ttl=REFRESH_TTL)
-def fetch_metar_ogimet(station="WARR"):
+def fetch_metar_ogimet(station=ICAO_STATION):
+    # try OGIMET HTML extraction, then NOAA plain text
     try:
-        og = requests.get(f"https://ogimet.com/display_metars2.php?lang=en&icao={station}", timeout=10)
+        og = session.get(f"https://ogimet.com/display_metars2.php?lang=en&icao={station}", timeout=10)
         if og.ok:
             text = og.text
             lines = [ln.strip() for ln in text.splitlines() if station in ln]
@@ -193,7 +205,7 @@ def fetch_metar_ogimet(station="WARR"):
     except Exception as e:
         logging.warning("OGIMET failed: %s", e)
     try:
-        r = requests.get(f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{station}.TXT", timeout=10)
+        r = session.get(f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{station}.TXT", timeout=10)
         if r.ok:
             lines = r.text.strip().splitlines()
             return lines[-1].strip()
@@ -224,6 +236,8 @@ def bmkg_cuaca_to_df(cuaca):
         if not isinstance(rec, dict):
             continue
         dt = rec.get("datetime") or rec.get("time") or rec.get("jamCuaca") or rec.get("date") or rec.get("valid_time")
+        # robust parse
+        t0 = None
         if isinstance(dt, str):
             try:
                 t0 = pd.to_datetime(dt.replace("Z", "+00:00"), utc=True)
@@ -321,6 +335,7 @@ def fuse_ensemble(df_merged, weights, hours=24):
         T_vals, RH_vals, CC_vals, VIS_vals = [], [], [], []
         u_vals, v_vals = [], []
         w_list = []
+        # BMKG (special tag)
         if weights.get("bmkg", 0) > 0:
             t = r.get("T_BMKG"); rh = r.get("RH_BMKG"); cc = r.get("CC_BMKG")
             ws = r.get("WS_BMKG"); wd = r.get("WD_BMKG"); vis = r.get("VIS_BMKG")
@@ -334,6 +349,7 @@ def fuse_ensemble(df_merged, weights, hours=24):
             if not pd.isna(ws) and not pd.isna(wd):
                 u, v = wind_to_uv(ws, wd); u_vals.append(u); v_vals.append(v)
             w_list.append(weights["bmkg"])
+        # Other models
         for model in ["ecmwf", "icon", "gfs"]:
             tag = model.upper()
             wt = weights.get(model, 0)
@@ -392,7 +408,7 @@ def compute_probabilities(df_merged, models_list=["GFS", "ECMWF", "ICON", "BMKG"
     return pd.DataFrame(probs)
 
 # -----------------------
-# TAF builder
+# TAF builder (simple, must be validated manually)
 # -----------------------
 def tcc_to_cloud_label(cc):
     if pd.isna(cc):
@@ -401,15 +417,26 @@ def tcc_to_cloud_label(cc):
         c = float(cc)
     except Exception:
         return "FEW020"
+    # coarse mapping to standard TAF cloud groups
     if c < 25: return "FEW020"
     elif c < 50: return "SCT025"
     elif c < 85: return "BKN030"
     else: return "OVC030"
 
 def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validity):
+    # NOTE: This builder produces a *basic* TAF-like output.
+    # Operational release MUST follow ICAO Annex 3 and national procedures (manual validation).
     taf_lines = []
-    header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt + timedelta(hours=validity)):%d%H}"
+    # Header: TAF <ICAO> <YYGGggZ>  VALID <DDHH/DDHH>
+    issue_yygg = issue_dt.strftime("%y%j%H%M")  # using year+day-of-year+HHMM as unique stamp (internal)
+    # Standard simpler header: use DDHHMMZ
+    issue_header = issue_dt.strftime("%d%H%MZ")
+    valid_from = issue_dt
+    valid_to = issue_dt + timedelta(hours=validity)
+    valid_period = f"{issue_dt.strftime('%d%H')}/{valid_to.strftime('%d%H')}"
+    header = f"TAF {ICAO_STATION} {issue_header} {valid_period}"
     taf_lines.append(header)
+
     if df_fused is None or df_fused.empty:
         taf_lines += ["00000KT 9999 FEW020", "NOSIG", "RMK AUTO FUSION BASED ON MODEL ONLY"]
         return taf_lines, []
@@ -444,7 +471,7 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
             becmg.append(f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} {tcc_to_cloud_label(curr.CC)}")
             signif_times.append(curr["time"])
 
-        precip_flag = (curr.CC and curr.CC >= 80 and curr.RH and curr.RH >= 85)
+        precip_flag = (curr.get("CC") is not None and curr.CC >= 80) and (curr.get("RH") is not None and curr.RH >= 85)
         if precip_flag:
             tempo.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
             signif_times.append(curr["time"])
@@ -480,14 +507,17 @@ def export_results(df_fused, df_probs, taf_lines, issue_dt):
 # MAIN ACTION
 # -----------------------
 if st.button("🚀 Generate Operational TAFOR (Fusion)"):
-    issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
+    # Build UTC issue datetime correctly (combine date + issue_time)
+    issue_dt = datetime.combine(issue_date, dtime(hour=issue_time, minute=0, second=0))
+    issue_dt = issue_dt.replace(tzinfo=None)  # naive UTC used for display / filenames; adjust if needed
+
     st.info("📡 Fetching BMKG / Open-Meteo / METAR ... (please wait)")
 
     bmkg = fetch_bmkg()
     gfs_json = fetch_openmeteo("gfs")
     ecmwf_json = fetch_openmeteo("ecmwf")
     icon_json = fetch_openmeteo("icon")
-    metar = fetch_metar_ogimet("WARR")
+    metar = fetch_metar_ogimet(ICAO_STATION)
 
     st.success("✅ Data fetched (or fallback used). Processing fusion...")
 
@@ -531,7 +561,7 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.markdown("### 📝 Generated TAFOR (Operational)")
     st.markdown(f"<pre>{taf_html}</pre>", unsafe_allow_html=True)
     valid_to = issue_dt + timedelta(hours=validity)
-    st.caption(f"Issued at {issue_dt:%d%H%MZ}, Valid {issue_dt:%d/%H}–{valid_to:%d/%H} UTC")
+    st.caption(f"Issued at {issue_dt:%d%H%MZ}, Valid {issue_dt:%d%H}/{valid_to:%d%H} UTC")
 
     # Plot
     st.markdown("### 📈 Fused 24h (T/RH/Cloud/WS) & Significant changes")
@@ -541,7 +571,7 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     ax.plot(df_fused["time"], df_fused["CC"], label="Cloud (%)")
     ax.plot(df_fused["time"], df_fused["WS"], label="Wind (kt)")
     for t in signif_times:
-        ax.axvline(t, color="orange", linestyle="--", alpha=0.6)
+        ax.axvline(t, linestyle="--", alpha=0.6)
     ax.legend(); ax.grid(True, linestyle="--", alpha=0.4)
     plt.xticks(rotation=35)
     st.pyplot(fig)
@@ -555,25 +585,24 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.markdown("### 💾 Exported Files")
     st.caption("File hasil fusi otomatis tersimpan di folder `output/`. Pilih tombol untuk mengunduh (CSV / JSON / ZIP).")
 
-    # Read file content bytes
-    with open(json_file, "r", encoding="utf-8") as f:
-        json_data = f.read()
-    with open(csv_file, "r", encoding="utf-8") as f:
-        csv_data = f.read()
+    # Prepare bytes once
+    with open(json_file, "rb") as f:
+        json_bytes = f.read()
+    with open(csv_file, "rb") as f:
+        csv_bytes = f.read()
 
-    # prepare ZIP in-memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(os.path.basename(csv_file), csv_data)
-        zf.writestr(os.path.basename(json_file), json_data)
+        zf.writestr(os.path.basename(csv_file), csv_bytes)
+        zf.writestr(os.path.basename(json_file), json_bytes)
     zip_buffer.seek(0)
     zip_bytes = zip_buffer.read()
 
-    # file size info
-    csv_size = os.path.getsize(csv_file) if os.path.exists(csv_file) else 0
-    json_size = os.path.getsize(json_file) if os.path.exists(json_file) else 0
+    csv_size = len(csv_bytes)
+    json_size = len(json_bytes)
     zip_size = len(zip_bytes)
 
+    # small CSS styling for buttons (kept)
     st.markdown(
         """
         <style>
@@ -586,15 +615,12 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
             transition: all 0.12s ease-in-out;
             box-shadow: 0 2px 6px rgba(0,0,0,0.18);
         }
-        /* first button (CSV) */
         div[data-testid="stDownloadButton"]:nth-child(1) > button {
             background: linear-gradient(90deg, #0066cc, #0099ff);
         }
-        /* second button (JSON) */
         div[data-testid="stDownloadButton"]:nth-child(2) > button {
             background: linear-gradient(90deg, #28a745, #6ddf7a);
         }
-        /* third button (ZIP) */
         div[data-testid="stDownloadButton"]:nth-child(3) > button {
             background: linear-gradient(90deg, #6f42c1, #a78bfa);
         }
@@ -610,14 +636,14 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     with col_csv:
         st.download_button(
             label=f"⬇️ CSV ({fmt_bytes(csv_size)})",
-            data=csv_data,
+            data=csv_bytes,
             file_name=os.path.basename(csv_file),
             mime="text/csv"
         )
     with col_json:
         st.download_button(
             label=f"📦 JSON ({fmt_bytes(json_size)})",
-            data=json_data,
+            data=json_bytes,
             file_name=os.path.basename(json_file),
             mime="application/json"
         )
@@ -629,12 +655,11 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
             mime="application/zip"
         )
 
-    st.success("✅ File berhasil diekspor dan siap diunduh.")
+    st.success("✅ File berhasil diekspor dan siap diunduh. (silakan VALIDASI manual sebelum rilis operasional)")
 
     # -----------------------
     # LOGGING + ALERTS (NEW)
     # -----------------------
-    # prepare log entry
     log_file = f"logs/{issue_dt:%Y%m%d}_tafor_log.csv"
     taf_text = " | ".join(taf_lines)
     pop_max = round((df_probs["PoP_precip"].max() if not df_probs.empty else 0.0) * 100, 1)
@@ -660,7 +685,14 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
         "wind_max_kt": wind_max,
         "rh_max_pct": rh_max,
         "cc_max_pct": cc_max,
-        "alerts": "; ".join(alerts)
+        "alerts": "; ".join(alerts),
+        "sources_ok": json.dumps({
+            "bmkg": bmkg.get("status") == "OK",
+            "gfs": bool(gfs_json),
+            "ecmwf": bool(ecmwf_json),
+            "icon": bool(icon_json),
+            "metar": bool(metar)
+        })
     }])
 
     if os.path.exists(log_file):
@@ -668,7 +700,6 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     else:
         log_df.to_csv(log_file, index=False)
 
-    # show alerts
     if alerts:
         for a in alerts:
             st.warning(a)
