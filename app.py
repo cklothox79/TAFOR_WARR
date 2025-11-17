@@ -442,7 +442,7 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     # initial state
     first = df_fused.iloc[0]
     wd0 = safe_int(first.WD, 90)
-    ws0 = safe_int(first.WS, 05)
+    ws0 = safe_int(first.WS, 5)
     vis0 = safe_int(first.VIS, 9999)
     cloud0 = tcc_to_cloud_label(first.CC)
     taf_lines.append(f"{wd0:03d}{ws0:02d}KT {vis0:04d} {cloud0}")
