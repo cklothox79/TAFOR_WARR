@@ -1,8 +1,11 @@
 # app.py
 """
-TAFOR Fusion Pro — Operational v2.8 (WARR / Sedati Gede)
-- Minor change: ensure every change (TEMPO, BECMG, etc.) is emitted on its OWN LINE.
-- Keeps: auto-weighting, CB/TS logic (option A), dry-run, log viewer, download TAF (.txt) & logs.
+TAFOR Fusion Pro — Operational v2.9 (WARR / Sedati Gede)
+- Minor updates:
+  * Enforce per-line TAF (Format A)
+  * Sort BECMG / TEMPO lines ascending by start time
+  * Short RMK: "RMK AUTO FUSION (BMKG, ECMWF, ICON & GFS)"
+- Keeps: auto-weighting, CB/TS logic, dry-run, log viewer, download TAF (.txt) & logs.
 - IMPORTANT: ALWAYS validate final TAFOR manually per ICAO Annex 3 & Perka BMKG.
 """
 
@@ -23,8 +26,8 @@ import matplotlib.pyplot as plt
 # -----------------------
 # Basic config
 # -----------------------
-st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.8 (WARR)", layout="centered")
-st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede) — v2.8")
+st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.9 (WARR)", layout="centered")
+st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede) — v2.9")
 st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
 
 # folders
@@ -47,7 +50,7 @@ DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
 # HTTP session
 session = requests.Session()
-session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.8"})
+session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.9"})
 
 # -----------------------
 # UI Inputs
@@ -489,7 +492,7 @@ def compute_probabilities(df_merged, models_list=["GFS", "ECMWF", "ICON", "BMKG"
     return pd.DataFrame(probs)
 
 # -----------------------
-# TAF building with new TS logic (PER-LINE output enforced)
+# TAF building with new TS logic (PER-LINE output, sorted)
 # -----------------------
 def tcc_to_cloud_label(cc):
     if pd.isna(cc):
@@ -503,15 +506,11 @@ def tcc_to_cloud_label(cc):
     elif c < 85: return "BKN030"
     else: return "OVC030"
 
-def parse_metar_for_ts(metar_text):
-    if not metar_text:
-        return False
-    return bool(re.search(r'(^|\s)(V?TS|TSRA|TSGR|\+TS|-TS)(\s|$)', metar_text.upper()))
-
 def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validity, df_probs=None):
     """
     Returns (taf_lines_list, signif_times_list, taf_text_str)
     taf_lines_list is a list where each element is one TAF line (no combined changes on same line).
+    BECMG / TEMPO lines will be sorted by start time (ascending).
     """
     taf_lines = []
     issue_header = issue_dt.strftime("%d%H%MZ")
@@ -523,7 +522,7 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     if df_fused is None or df_fused.empty:
         taf_lines.append("00000KT 9999 FEW020")
         taf_lines.append("NOSIG")
-        taf_lines.append("RMK AUTO FUSION BASED ON MODEL ONLY")
+        taf_lines.append("RMK AUTO FUSION (BMKG, ECMWF, ICON & GFS)")
         taf_text = sanitize_taf_text_lines(taf_lines)
         return taf_lines, [], taf_text
 
@@ -539,8 +538,8 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     WIND_SPEED_DELTA = 10  # kt
     WIND_SIGNIFICANT_SPEED = 25  # kt
 
-    becmg = []
-    tempo = []
+    becmg_entries = []  # will store tuples (sort_key_int, line)
+    tempo_entries = []
     signif_times = []
 
     metar_has_ts = parse_metar_for_ts(metar)
@@ -550,6 +549,13 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         curr = df_fused.iloc[i]
         tstart = prev["time"].strftime("%d%H")
         tend = curr["time"].strftime("%d%H")
+
+        # compute integer sort key (ddHH -> ddHH as int)
+        try:
+            sort_key = int(tstart)
+        except Exception:
+            # fallback to timestamp
+            sort_key = int(curr["time"].strftime("%Y%m%d%H"))
 
         # wind checks
         wd_prev = safe_to_float(prev.WD) if not pd.isna(prev.WD) else np.nan
@@ -591,15 +597,15 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         metar_tokens = normalize_weather(metar) if metar else []
         include_ts = should_include_ts(metar_tokens, curr_cb, metar_has_ts=metar_has_ts)
 
-        # Build per-line statements (each entry is its own line element)
+        # Build per-line statements (each entry is own line), but store with sort key
         if sig_wind:
             becmg_line = f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} {tcc_to_cloud_label(curr.CC)}"
-            becmg.append(becmg_line)
+            becmg_entries.append((sort_key, becmg_line))
             signif_times.append(curr["time"])
 
         if sig_cloud and curr_cb:
             becmg_line = f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} CB"
-            becmg.append(becmg_line)
+            becmg_entries.append((sort_key, becmg_line))
             signif_times.append(curr["time"])
 
         if precip_flag:
@@ -607,22 +613,24 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
                 tempo_line = f"TEMPO {tstart}/{tend} 4000 +TSRA SCT020CB"
             else:
                 tempo_line = f"TEMPO {tstart}/{tend} 4000 -RA"
-            tempo.append(tempo_line)
+            tempo_entries.append((sort_key, tempo_line))
             signif_times.append(curr["time"])
 
-    # Append each change on its own line (preserve order: all BECMG then all TEMPO)
-    if becmg:
-        for b in becmg:
-            taf_lines.append(b)
-    if tempo:
-        for t in tempo:
-            taf_lines.append(t)
+    # sort entries by start time ascending, then append each as its own line
+    if becmg_entries:
+        becmg_entries_sorted = sorted(becmg_entries, key=lambda x: x[0])
+        for _, line in becmg_entries_sorted:
+            taf_lines.append(line)
+    if tempo_entries:
+        tempo_entries_sorted = sorted(tempo_entries, key=lambda x: x[0])
+        for _, line in tempo_entries_sorted:
+            taf_lines.append(line)
 
-    if not becmg and not tempo:
+    if not becmg_entries and not tempo_entries:
         taf_lines.append("NOSIG")
 
     source_marker = "METAR+MODEL FUSION" if metar else "MODEL FUSION"
-    taf_lines.append(f"RMK AUTO FUSION BASED ON {source_marker}")
+    taf_lines.append(f"RMK AUTO FUSION (BMKG, ECMWF, ICON & GFS)")
 
     # sanitize & join preserving per-line structure
     taf_text = sanitize_taf_text_lines(taf_lines)
