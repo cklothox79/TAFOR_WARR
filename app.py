@@ -1,12 +1,8 @@
 # app.py
 """
-TAFOR Fusion Pro — Operational v2.7 (WARR / Sedati Gede)
-- Integrates: auto-weighting of ensembles (BMKG=45, ECMWF=45, ICON=5, GFS=5)
-- Priorities:
-    * If Auto-weight enabled: compute weights from available sources and normalize.
-    * If disabled: uses user-specified weights.
-- Features: fusion BMKG + Open-Meteo + METAR, strict TAF rules, TS logic (CB-based),
-  dry-run, log viewer (terminal-like), download TAFOR (.txt) and logs (.txt/.log).
+TAFOR Fusion Pro — Operational v2.8 (WARR / Sedati Gede)
+- Minor change: ensure every change (TEMPO, BECMG, etc.) is emitted on its OWN LINE.
+- Keeps: auto-weighting, CB/TS logic (option A), dry-run, log viewer, download TAF (.txt) & logs.
 - IMPORTANT: ALWAYS validate final TAFOR manually per ICAO Annex 3 & Perka BMKG.
 """
 
@@ -14,7 +10,6 @@ import os
 import io
 import json
 import logging
-import zipfile
 from datetime import datetime, timedelta, time as dtime
 import math
 import re
@@ -28,8 +23,8 @@ import matplotlib.pyplot as plt
 # -----------------------
 # Basic config
 # -----------------------
-st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.7 (WARR)", layout="centered")
-st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede) — v2.7")
+st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.8 (WARR)", layout="centered")
+st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede) — v2.8")
 st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
 
 # folders
@@ -52,7 +47,7 @@ DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
 # HTTP session
 session = requests.Session()
-session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.7"})
+session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.8"})
 
 # -----------------------
 # UI Inputs
@@ -98,7 +93,7 @@ st.write("Tekan tombol untuk generate TAFOR (fusion). Pastikan koneksi ke API te
 # Helpers
 # -----------------------
 def wind_to_uv(speed, deg):
-    if speed is None or deg is None or (isinstance(speed, float) and math.isnan(speed)) or (isinstance(deg, float) and math.isnan(deg)):
+    if speed is None or deg is None or (isinstance(speed, float) and np.isnan(speed)) or (isinstance(deg, float) and np.isnan(deg)):
         return np.nan, np.nan
     theta = math.radians((270.0 - deg) % 360.0)
     return speed * math.cos(theta), speed * math.sin(theta)
@@ -148,9 +143,19 @@ def fmt_bytes(n):
         n /= 1024.0
     return f"{n:.1f} PB"
 
-def sanitize_taf_text(txt):
-    lines = [re.sub(r'\s+', ' ', l).strip() for l in txt.splitlines() if l.strip()]
-    return "\n".join(lines)
+def sanitize_taf_text_lines(lines):
+    """
+    Accepts a list of TAF lines and returns a clean string with one entry per line.
+    Preserves line breaks, strips extra spaces per line.
+    """
+    clean = []
+    for l in lines:
+        if not isinstance(l, str):
+            continue
+        s = re.sub(r'\s+', ' ', l).strip()
+        if s:
+            clean.append(s)
+    return "\n".join(clean)
 
 # -----------------------
 # Auto-weighting utility
@@ -163,11 +168,9 @@ def compute_auto_weights(availability):
     """
     active = {k: v for k, v in BASE_WEIGHTS_PERC.items() if availability.get(k, False)}
     if not active:
-        # none available -> return zeros
         return {"bmkg": 0.0, "ecmwf": 0.0, "icon": 0.0, "gfs": 0.0}
     total_active = sum(active.values())
     normalized = {k: (v / total_active) for k, v in active.items()}
-    # fill full dict
     final = {
         "bmkg": normalized.get("bmkg", 0.0),
         "ecmwf": normalized.get("ecmwf", 0.0),
@@ -177,7 +180,7 @@ def compute_auto_weights(availability):
     return final
 
 # -----------------------
-# TS / cloud / weather helpers (kept from previous)
+# TS / cloud / weather helpers
 # -----------------------
 def detect_cb_from_model_flag(flag):
     if not flag:
@@ -188,17 +191,6 @@ def detect_cb_from_model_flag(flag):
             return True
     except Exception:
         pass
-    return False
-
-def detect_cb_from_layers(cloud_layers):
-    if not cloud_layers:
-        return False
-    for cl in cloud_layers:
-        if not isinstance(cl, dict):
-            continue
-        t = (cl.get("type") or "").upper()
-        if "CB" in t or "TCU" in t:
-            return True
     return False
 
 def normalize_weather(wx):
@@ -212,9 +204,8 @@ def normalize_weather(wx):
     words = re.split(r'\s+', s)
     for w in words:
         for p in patterns:
-            if p in w:
-                if p not in tokens:
-                    tokens.append(p)
+            if p in w and p not in tokens:
+                tokens.append(p)
     for p in patterns:
         if p in s and p not in tokens:
             tokens.append(p)
@@ -498,7 +489,7 @@ def compute_probabilities(df_merged, models_list=["GFS", "ECMWF", "ICON", "BMKG"
     return pd.DataFrame(probs)
 
 # -----------------------
-# TAF building with new TS logic
+# TAF building with new TS logic (PER-LINE output enforced)
 # -----------------------
 def tcc_to_cloud_label(cc):
     if pd.isna(cc):
@@ -518,6 +509,10 @@ def parse_metar_for_ts(metar_text):
     return bool(re.search(r'(^|\s)(V?TS|TSRA|TSGR|\+TS|-TS)(\s|$)', metar_text.upper()))
 
 def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validity, df_probs=None):
+    """
+    Returns (taf_lines_list, signif_times_list, taf_text_str)
+    taf_lines_list is a list where each element is one TAF line (no combined changes on same line).
+    """
     taf_lines = []
     issue_header = issue_dt.strftime("%d%H%MZ")
     valid_to = issue_dt + timedelta(hours=validity)
@@ -526,10 +521,13 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     taf_lines.append(header)
 
     if df_fused is None or df_fused.empty:
-        taf_lines += ["00000KT 9999 FEW020", "NOSIG", "RMK AUTO FUSION BASED ON MODEL ONLY"]
-        return taf_lines, [], "\n".join(taf_lines)
+        taf_lines.append("00000KT 9999 FEW020")
+        taf_lines.append("NOSIG")
+        taf_lines.append("RMK AUTO FUSION BASED ON MODEL ONLY")
+        taf_text = sanitize_taf_text_lines(taf_lines)
+        return taf_lines, [], taf_text
 
-    # base state
+    # base state (initial forecast line)
     first = df_fused.iloc[0]
     wd0 = safe_int(first.WD, 90)
     ws0 = safe_int(first.WS, 5)
@@ -553,6 +551,7 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         tstart = prev["time"].strftime("%d%H")
         tend = curr["time"].strftime("%d%H")
 
+        # wind checks
         wd_prev = safe_to_float(prev.WD) if not pd.isna(prev.WD) else np.nan
         wd_curr = safe_to_float(curr.WD) if not pd.isna(curr.WD) else np.nan
         ws_prev = safe_to_float(prev.WS) if not pd.isna(prev.WS) else np.nan
@@ -573,6 +572,7 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         if (not pd.isna(ws_curr)) and (ws_curr >= WIND_SIGNIFICANT_SPEED):
             sig_wind = True
 
+        # cloud significant only if CB appears/disappears
         prev_cb = bool(prev.get("CB", False))
         curr_cb = bool(curr.get("CB", False))
         sig_cloud = False
@@ -581,43 +581,51 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         elif prev_cb and (not curr_cb):
             sig_cloud = True
 
+        # precipitation detection
         prob_row = None
         if df_probs is not None and curr["time"] in list(df_probs["time"]):
             prob_row = df_probs[df_probs["time"] == curr["time"]].iloc[0].to_dict()
         precip_flag = infer_precip_from_probs_and_conditions(prob_row, curr.CC, curr.RH)
 
-        # tokens from metar
+        # tokens from metar (prioritize metar for TS tokens)
         metar_tokens = normalize_weather(metar) if metar else []
         include_ts = should_include_ts(metar_tokens, curr_cb, metar_has_ts=metar_has_ts)
 
+        # Build per-line statements (each entry is its own line element)
         if sig_wind:
-            becmg.append(f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} {tcc_to_cloud_label(curr.CC)}")
+            becmg_line = f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} {tcc_to_cloud_label(curr.CC)}"
+            becmg.append(becmg_line)
             signif_times.append(curr["time"])
 
-        if sig_cloud:
-            if curr_cb:
-                becmg.append(f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} CB")
-                signif_times.append(curr["time"])
+        if sig_cloud and curr_cb:
+            becmg_line = f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} CB"
+            becmg.append(becmg_line)
+            signif_times.append(curr["time"])
 
         if precip_flag:
             if include_ts:
-                tempo.append(f"TEMPO {tstart}/{tend} 4000 +TSRA SCT020CB")
+                tempo_line = f"TEMPO {tstart}/{tend} 4000 +TSRA SCT020CB"
             else:
-                tempo.append(f"TEMPO {tstart}/{tend} 4000 -RA")
+                tempo_line = f"TEMPO {tstart}/{tend} 4000 -RA"
+            tempo.append(tempo_line)
             signif_times.append(curr["time"])
 
+    # Append each change on its own line (preserve order: all BECMG then all TEMPO)
     if becmg:
-        taf_lines += becmg
+        for b in becmg:
+            taf_lines.append(b)
     if tempo:
-        taf_lines += tempo
+        for t in tempo:
+            taf_lines.append(t)
+
     if not becmg and not tempo:
         taf_lines.append("NOSIG")
 
     source_marker = "METAR+MODEL FUSION" if metar else "MODEL FUSION"
     taf_lines.append(f"RMK AUTO FUSION BASED ON {source_marker}")
 
-    taf_text = "\n".join(taf_lines)
-    taf_text = sanitize_taf_text(taf_text)
+    # sanitize & join preserving per-line structure
+    taf_text = sanitize_taf_text_lines(taf_lines)
     return taf_lines, sorted(list(set(signif_times))), taf_text
 
 # -----------------------
@@ -676,11 +684,9 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     # compute effective weights
     if auto_weight:
         eff_weights = compute_auto_weights(availability)
-        # show percentages & fractions
         show_weights_frac = {k: round(v, 3) for k, v in eff_weights.items()}
         st.info(f"Auto-weight active — effective weights (fractions): {show_weights_frac}")
     else:
-        # use manual weights from UI
         eff_weights = manual_weights
         st.info(f"Manual weights active — effective weights (fractions): {eff_weights}")
 
@@ -743,6 +749,7 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.code(metar or "Not available")
 
     st.markdown("### 📝 Generated TAFOR (Operational)")
+    # show with <pre> to preserve per-line formatting
     st.markdown(f"<pre>{taf_text}</pre>", unsafe_allow_html=True)
     valid_to = issue_dt + timedelta(hours=validity)
     st.caption(f"Issued at {issue_dt:%d%H%MZ}, Valid {issue_dt:%d%H}/{valid_to:%d%H} UTC — Dry-run: {dry_run}")
