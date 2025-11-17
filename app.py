@@ -1,12 +1,13 @@
 # app.py
 """
-TAFOR Fusion Pro — Operational v2.6 (WARR / Sedati Gede)
-- Full Streamlit app with:
-  * fusion BMKG + Open-Meteo + METAR
-  * strict TAF rules: wind thresholds, cloud CB rules
-  * TS detection logic (CB + METAR)
-  * dry-run, log viewer (terminal-like), download TAFOR (.txt) and logs (.txt/.log)
-- Important: ALWAYS validate final TAFOR manually per ICAO Annex 3 & Perka BMKG.
+TAFOR Fusion Pro — Operational v2.7 (WARR / Sedati Gede)
+- Integrates: auto-weighting of ensembles (BMKG=45, ECMWF=45, ICON=5, GFS=5)
+- Priorities:
+    * If Auto-weight enabled: compute weights from available sources and normalize.
+    * If disabled: uses user-specified weights.
+- Features: fusion BMKG + Open-Meteo + METAR, strict TAF rules, TS logic (CB-based),
+  dry-run, log viewer (terminal-like), download TAFOR (.txt) and logs (.txt/.log).
+- IMPORTANT: ALWAYS validate final TAFOR manually per ICAO Annex 3 & Perka BMKG.
 """
 
 import os
@@ -27,8 +28,8 @@ import matplotlib.pyplot as plt
 # -----------------------
 # Basic config
 # -----------------------
-st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.6 (WARR)", layout="centered")
-st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede) — v2.6")
+st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.7 (WARR)", layout="centered")
+st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede) — v2.7")
 st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
 
 # folders
@@ -44,11 +45,14 @@ ICAO_STATION = "WARR"            # TAF header station
 TAF_FILENAME_STATION = "WAII"    # filename station token as requested
 ADM4 = "35.15.17.2011"
 REFRESH_TTL = 600  # seconds
+# default base weights (percent)
+BASE_WEIGHTS_PERC = {"bmkg": 45.0, "ecmwf": 45.0, "icon": 5.0, "gfs": 5.0}
+# fallback user-defaults (fractions)
 DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
 # HTTP session
 session = requests.Session()
-session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.6"})
+session.headers.update({"User-Agent": "TAFOR-Fusion-Pro/2.7"})
 
 # -----------------------
 # UI Inputs
@@ -65,15 +69,18 @@ with col3:
 
 st.markdown("### ⚙️ Ensemble weights (BMKG priority)")
 wcols = st.columns(4)
-bmkg_w = wcols[0].number_input("BMKG", 0.0, 1.0, value=DEFAULT_WEIGHTS["bmkg"], step=0.05)
-ecmwf_w = wcols[1].number_input("ECMWF", 0.0, 1.0, value=DEFAULT_WEIGHTS["ecmwf"], step=0.05)
-icon_w = wcols[2].number_input("ICON", 0.0, 1.0, value=DEFAULT_WEIGHTS["icon"], step=0.05)
-gfs_w = wcols[3].number_input("GFS", 0.0, 1.0, value=DEFAULT_WEIGHTS["gfs"], step=0.05)
+bmkg_w = wcols[0].number_input("BMKG", 0.0, 1.0, value=DEFAULT_WEIGHTS["bmkg"], step=0.05, key="bmkg_w")
+ecmwf_w = wcols[1].number_input("ECMWF", 0.0, 1.0, value=DEFAULT_WEIGHTS["ecmwf"], step=0.05, key="ecmwf_w")
+icon_w = wcols[2].number_input("ICON", 0.0, 1.0, value=DEFAULT_WEIGHTS["icon"], step=0.05, key="icon_w")
+gfs_w = wcols[3].number_input("GFS", 0.0, 1.0, value=DEFAULT_WEIGHTS["gfs"], step=0.05, key="gfs_w")
 _sumw = bmkg_w + ecmwf_w + icon_w + gfs_w
 if _sumw <= 0:
     _sumw = 1.0
-weights = {"bmkg": bmkg_w / _sumw, "ecmwf": ecmwf_w / _sumw, "icon": icon_w / _sumw, "gfs": gfs_w / _sumw}
-st.caption(f"Normalized weights: {weights}")
+manual_weights = {"bmkg": bmkg_w / _sumw, "ecmwf": ecmwf_w / _sumw, "icon": icon_w / _sumw, "gfs": gfs_w / _sumw}
+st.caption(f"Normalized manual weights: {manual_weights}")
+
+# Auto-weight toggle
+auto_weight = st.checkbox("🔁 Auto-weight ensembles (use default priorities and redistribute if some unavailable)", value=True)
 
 st.divider()
 
@@ -146,12 +153,33 @@ def sanitize_taf_text(txt):
     return "\n".join(lines)
 
 # -----------------------
-# TS / cloud / weather helpers (new)
+# Auto-weighting utility
+# -----------------------
+def compute_auto_weights(availability):
+    """
+    availability: dict with keys 'bmkg','ecmwf','icon','gfs' boolean True/False
+    base percentages defined in BASE_WEIGHTS_PERC
+    returns dict of normalized fractional weights summing to 1.0
+    """
+    active = {k: v for k, v in BASE_WEIGHTS_PERC.items() if availability.get(k, False)}
+    if not active:
+        # none available -> return zeros
+        return {"bmkg": 0.0, "ecmwf": 0.0, "icon": 0.0, "gfs": 0.0}
+    total_active = sum(active.values())
+    normalized = {k: (v / total_active) for k, v in active.items()}
+    # fill full dict
+    final = {
+        "bmkg": normalized.get("bmkg", 0.0),
+        "ecmwf": normalized.get("ecmwf", 0.0),
+        "icon": normalized.get("icon", 0.0),
+        "gfs": normalized.get("gfs", 0.0)
+    }
+    return final
+
+# -----------------------
+# TS / cloud / weather helpers (kept from previous)
 # -----------------------
 def detect_cb_from_model_flag(flag):
-    """
-    Simple check: model/BMKG may set explicit cloud type flags.
-    """
     if not flag:
         return False
     try:
@@ -163,10 +191,6 @@ def detect_cb_from_model_flag(flag):
     return False
 
 def detect_cb_from_layers(cloud_layers):
-    """
-    cloud_layers: list of dicts like {"amount":"BKN","type":"CB","base":2500}
-    fallback: if any element's 'type' contains 'CB' or 'TCU' => True
-    """
     if not cloud_layers:
         return False
     for cl in cloud_layers:
@@ -178,26 +202,19 @@ def detect_cb_from_layers(cloud_layers):
     return False
 
 def normalize_weather(wx):
-    """
-    Normalize METAR/model raw weather string into tokens we care about.
-    Returns list of tokens like ['+TSRA','TSRA','-RA','RA','SHRA',...]
-    """
     if not wx:
         return []
     s = str(wx).upper()
     s = s.replace(",", " ")
-    # common tokens in order of priority
     patterns = ["+TSRA", "-TSRA", "TSRA", "TSGR", "+TS", "-TS", "VCTS", "TS",
                 "+RA", "-RA", "SHRA", "RA", "SH", "DZ", "BR", "FG", "BC", "DR", "BL"]
     tokens = []
-    # simple token extraction
     words = re.split(r'\s+', s)
     for w in words:
         for p in patterns:
             if p in w:
                 if p not in tokens:
                     tokens.append(p)
-    # also check continuous string matches
     for p in patterns:
         if p in s and p not in tokens:
             tokens.append(p)
@@ -209,21 +226,13 @@ def parse_metar_for_ts(metar_text):
     return bool(re.search(r'(^|\s)(V?TS|TSRA|TSGR|\+TS|-TS)(\s|$)', metar_text.upper()))
 
 def should_include_ts(tokens, cb_present, metar_has_ts=False):
-    """
-    Business rule: include TS if CB present OR metar explicitly has TS.
-    tokens: weather tokens from normalize_weather
-    """
     ts_codes = ["+TSRA", "-TSRA", "TSRA", "TSGR", "+TS", "-TS", "TS", "VCTS"]
     has_ts_token = any(t in ts_codes for t in tokens)
-    # include if CB present and token indicates TS OR if metar explicitly indicates TS and user wants that
     if (cb_present and has_ts_token) or (metar_has_ts and has_ts_token):
         return True
     return False
 
 def infer_precip_from_probs_and_conditions(prob_row, cc, rh):
-    """
-    Simple decision: high PoP or high RH+CC indicates likely precipitation.
-    """
     pop = 0.0
     if prob_row is not None and "PoP_precip" in prob_row:
         try:
@@ -414,6 +423,7 @@ def fuse_ensemble(df_merged, weights, hours=24):
         u_vals, v_vals = [], []
         w_list = []
         cb_flag = False
+        # BMKG
         if weights.get("bmkg", 0) > 0:
             t = r.get("T_BMKG"); rh = r.get("RH_BMKG"); cc = r.get("CC_BMKG")
             ws = r.get("WS_BMKG"); wd = r.get("WD_BMKG"); vis = r.get("VIS_BMKG")
@@ -426,10 +436,10 @@ def fuse_ensemble(df_merged, weights, hours=24):
                 pass
             if not pd.isna(ws) and not pd.isna(wd):
                 u, v = wind_to_uv(ws, wd); u_vals.append(u); v_vals.append(v)
-            # detect BMKG CB flag if any
             if detect_cb_from_model_flag(r.get("CLOUDTYPE_BMKG")):
                 cb_flag = True
             w_list.append(weights["bmkg"])
+        # other models
         for model in ["ecmwf", "icon", "gfs"]:
             tag = model.upper()
             wt = weights.get(model, 0)
@@ -446,8 +456,6 @@ def fuse_ensemble(df_merged, weights, hours=24):
                 pass
             if not pd.isna(ws) and not pd.isna(wd):
                 u, v = wind_to_uv(ws, wd); u_vals.append(u); v_vals.append(v)
-            # model CB detection: some models might include cloud type info in custom fields
-            # we skip detailed model CB detection for now
             w_list.append(wt)
         if not w_list:
             continue
@@ -504,6 +512,11 @@ def tcc_to_cloud_label(cc):
     elif c < 85: return "BKN030"
     else: return "OVC030"
 
+def parse_metar_for_ts(metar_text):
+    if not metar_text:
+        return False
+    return bool(re.search(r'(^|\s)(V?TS|TSRA|TSGR|\+TS|-TS)(\s|$)', metar_text.upper()))
+
 def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validity, df_probs=None):
     taf_lines = []
     issue_header = issue_dt.strftime("%d%H%MZ")
@@ -540,7 +553,6 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         tstart = prev["time"].strftime("%d%H")
         tend = curr["time"].strftime("%d%H")
 
-        # wind diffs
         wd_prev = safe_to_float(prev.WD) if not pd.isna(prev.WD) else np.nan
         wd_curr = safe_to_float(curr.WD) if not pd.isna(curr.WD) else np.nan
         ws_prev = safe_to_float(prev.WS) if not pd.isna(prev.WS) else np.nan
@@ -561,7 +573,6 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         if (not pd.isna(ws_curr)) and (ws_curr >= WIND_SIGNIFICANT_SPEED):
             sig_wind = True
 
-        # cloud significant only if CB appears/disappears
         prev_cb = bool(prev.get("CB", False))
         curr_cb = bool(curr.get("CB", False))
         sig_cloud = False
@@ -570,22 +581,15 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         elif prev_cb and (not curr_cb):
             sig_cloud = True
 
-        # precipitation detection
         prob_row = None
         if df_probs is not None and curr["time"] in list(df_probs["time"]):
             prob_row = df_probs[df_probs["time"] == curr["time"]].iloc[0].to_dict()
         precip_flag = infer_precip_from_probs_and_conditions(prob_row, curr.CC, curr.RH)
 
-        # weather tokens: combine METAR + model hints (simple)
-        # favorit: if metar text includes TS or +TS then consider metar_has_ts above
-        # include TS only if CB present OR metar_has_ts & cb presence (align with decided rule)
-        include_ts = False
-        # build tokens from METAR and merged (prefer metar)
+        # tokens from metar
         metar_tokens = normalize_weather(metar) if metar else []
-        if should_include_ts(metar_tokens, curr_cb, metar_has_ts=metar_has_ts):
-            include_ts = True
+        include_ts = should_include_ts(metar_tokens, curr_cb, metar_has_ts=metar_has_ts)
 
-        # Build statements
         if sig_wind:
             becmg.append(f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} {tcc_to_cloud_label(curr.CC)}")
             signif_times.append(curr["time"])
@@ -594,11 +598,9 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
             if curr_cb:
                 becmg.append(f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} CB")
                 signif_times.append(curr["time"])
-            # else ignore amount-only changes
 
         if precip_flag:
             if include_ts:
-                # prefer +TSRA if models/inputs strongly suggest convective
                 tempo.append(f"TEMPO {tstart}/{tend} 4000 +TSRA SCT020CB")
             else:
                 tempo.append(f"TEMPO {tstart}/{tend} 4000 -RA")
@@ -656,14 +658,35 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     issue_dt = datetime.combine(issue_date, dtime(hour=issue_time, minute=0, second=0))
     st.info("📡 Fetching BMKG / Open-Meteo / METAR ... (please wait)")
 
+    # fetch data
     bmkg_raw = fetch_bmkg()
     gfs_json = fetch_openmeteo("gfs")
     ecmwf_json = fetch_openmeteo("ecmwf")
     icon_json = fetch_openmeteo("icon")
     metar = fetch_metar_ogimet(ICAO_STATION)
 
+    # determine availability
+    availability = {
+        "bmkg": bool(bmkg_raw),
+        "ecmwf": bool(ecmwf_json),
+        "icon": bool(icon_json),
+        "gfs": bool(gfs_json)
+    }
+
+    # compute effective weights
+    if auto_weight:
+        eff_weights = compute_auto_weights(availability)
+        # show percentages & fractions
+        show_weights_frac = {k: round(v, 3) for k, v in eff_weights.items()}
+        st.info(f"Auto-weight active — effective weights (fractions): {show_weights_frac}")
+    else:
+        # use manual weights from UI
+        eff_weights = manual_weights
+        st.info(f"Manual weights active — effective weights (fractions): {eff_weights}")
+
     st.success("✅ Data fetched (or fallback used). Processing fusion...")
 
+    # parse model dfs
     df_gfs = openmeteo_json_to_df(gfs_json, "GFS")
     df_ecmwf = openmeteo_json_to_df(ecmwf_json, "ECMWF")
     df_icon = openmeteo_json_to_df(icon_json, "ICON")
@@ -671,7 +694,6 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     df_bmkg = None
     try:
         if isinstance(bmkg_raw, dict) and bmkg_raw.get("data"):
-            # heuristic: bmkg_raw["data"][0]["cuaca"] may be nested
             first = bmkg_raw["data"][0]
             cuaca = first.get("cuaca")
             df_bmkg = bmkg_cuaca_to_df(cuaca)
@@ -685,7 +707,8 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
         st.error("No model data available to fuse.")
         st.stop()
 
-    df_fused = fuse_ensemble(df_merged, weights, hours=validity)
+    # fuse using eff_weights (note: our fuse expects weights keyed by model lower-case)
+    df_fused = fuse_ensemble(df_merged, eff_weights, hours=validity)
     if df_fused is None or df_fused.empty:
         st.error("Fusion failed / empty result.")
         st.stop()
@@ -703,15 +726,18 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
 
     taf_path, csv_path, json_path = export_results_files(df_fused, df_probs, taf_lines, taf_text, issue_dt, dry_run=dry_run)
 
-    # DISPLAY
-    st.subheader("📊 Source summary")
+    # DISPLAY summary with availability
+    st.subheader("📊 Source summary & availability")
     st.write({
-        "BMKG ADM4 (Sedati Gede 35.15.17.2011)": "OK" if bmkg_raw else "Unavailable",
-        "GFS": "OK" if gfs_json else "Unavailable",
-        "ECMWF": "OK" if ecmwf_json else "Unavailable",
-        "ICON": "OK" if icon_json else "Unavailable",
+        "BMKG ADM4 (Sedati Gede 35.15.17.2011)": "OK" if availability["bmkg"] else "Unavailable",
+        "GFS": "OK" if availability["gfs"] else "Unavailable",
+        "ECMWF": "OK" if availability["ecmwf"] else "Unavailable",
+        "ICON": "OK" if availability["icon"] else "Unavailable",
         "METAR (OGIMET/NOAA)": "OK" if metar else "Unavailable"
     })
+
+    st.markdown("### ℹ️ Effective ensemble weights (fractions)")
+    st.write({k: round(v, 3) for k, v in eff_weights.items()})
 
     st.markdown("### 📡 METAR (Realtime OGIMET/NOAA)")
     st.code(metar or "Not available")
@@ -780,15 +806,16 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
         "cc_max_pct": cc_max,
         "alerts": "; ".join(alerts),
         "sources_ok": json.dumps({
-            "bmkg": bool(bmkg_raw),
-            "gfs": bool(gfs_json),
-            "ecmwf": bool(ecmwf_json),
-            "icon": bool(icon_json),
+            "bmkg": availability["bmkg"],
+            "gfs": availability["gfs"],
+            "ecmwf": availability["ecmwf"],
+            "icon": availability["icon"],
             "metar": bool(metar)
-        })
+        }),
+        "effective_weights": json.dumps({k: round(v, 4) for k, v in eff_weights.items()})
     }
 
-    log_line_human = f"[{log_entry['timestamp']}] ISSUE {log_entry['issue_time']} VALID {validity}h | alerts: {log_entry['alerts']} | sources_ok: {log_entry['sources_ok']}\nTAF:\n{taf_text}\n---\n"
+    log_line_human = f"[{log_entry['timestamp']}] ISSUE {log_entry['issue_time']} VALID {validity}h | alerts: {log_entry['alerts']} | sources_ok: {log_entry['sources_ok']} | weights: {log_entry['effective_weights']}\nTAF:\n{taf_text}\n---\n"
     if not dry_run:
         with open(log_path_txt, "a", encoding="utf-8") as f:
             f.write(log_line_human)
